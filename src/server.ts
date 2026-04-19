@@ -14,6 +14,45 @@ export interface ServeOptions {
   port: number
 }
 
+interface SessionCountSnapshot {
+  reqId: string
+  model: string
+  messageCount: number
+  toolCount: number
+  tokens: number
+}
+
+interface SessionMessageSnapshot {
+  reqId: string
+  model: string
+  messageCount: number
+  toolCount: number
+  localInputTokens?: number
+  translatedInputTokens?: number
+}
+
+interface SessionTimelineState {
+  seq: number
+  lastCount?: SessionCountSnapshot
+  lastMessage?: SessionMessageSnapshot
+}
+
+const sessionTimeline = new Map<string, SessionTimelineState>()
+
+function nextSessionTimeline(sessionId?: string): {
+  state?: SessionTimelineState
+  sessionSeq?: number
+} {
+  if (!sessionId) return {}
+  let state = sessionTimeline.get(sessionId)
+  if (!state) {
+    state = { seq: 0 }
+    sessionTimeline.set(sessionId, state)
+  }
+  state.seq += 1
+  return { state, sessionSeq: state.seq }
+}
+
 export function startServer(opts: ServeOptions): { stop: () => void; port: number } {
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -51,15 +90,37 @@ async function route(req: Request, url: URL, reqId: string): Promise<Response> {
   if (req.method === "POST" && url.pathname === "/v1/messages/count_tokens") {
     const body = (await req.json()) as AnthropicRequest
     const tokens = countTokens(body)
+    const sessionId = req.headers.get("x-claude-code-session-id") || undefined
+    const { state, sessionSeq } = nextSessionTimeline(sessionId)
+    const messageCount = body.messages?.length ?? 0
+    const toolCount = body.tools?.length ?? 0
     log.debug("count_tokens", { reqId, tokens })
+    if (state) {
+      state.lastCount = {
+        reqId,
+        model: body.model,
+        messageCount,
+        toolCount,
+        tokens,
+      }
+    }
     if (VERBOSE) {
       log.info("compaction telemetry", {
         reqId,
+        phase: "count_tokens",
         path: url.pathname,
+        sessionId,
+        sessionSeq,
         model: body.model,
         tokens,
-        messageCount: body.messages?.length ?? 0,
-        toolCount: body.tools?.length ?? 0,
+        messageCount,
+        toolCount,
+        previousMessageReqId: state?.lastMessage?.reqId,
+        previousMessageModel: state?.lastMessage?.model,
+        previousMessageCount: state?.lastMessage?.messageCount,
+        previousMessageToolCount: state?.lastMessage?.toolCount,
+        previousMessageLocalInputTokens: state?.lastMessage?.localInputTokens,
+        previousMessageTranslatedInputTokens: state?.lastMessage?.translatedInputTokens,
       })
     }
     return new Response(JSON.stringify({ input_tokens: tokens }), {
@@ -83,14 +144,17 @@ async function handleMessages(req: Request, reqId: string): Promise<Response> {
   }
 
   const sessionId = req.headers.get("x-claude-code-session-id") || undefined
+  const { state, sessionSeq } = nextSessionTimeline(sessionId)
   const messageId = `msg_${crypto.randomUUID().replace(/-/g, "")}`
   const wantStream = body.stream !== false
+  const messageCount = body.messages?.length ?? 0
+  const toolCount = body.tools?.length ?? 0
 
   log.debug("anthropic request", {
     reqId,
     model: body.model,
-    messageCount: body.messages?.length,
-    toolCount: body.tools?.length ?? 0,
+    messageCount,
+    toolCount,
     stream: wantStream,
     sessionId,
     hasJsonSchemaFormat: body.output_config?.format?.type === "json_schema",
@@ -115,6 +179,16 @@ async function handleMessages(req: Request, reqId: string): Promise<Response> {
   const translated = translateRequest({ ...body, model: resolvedModel }, { sessionId })
   const localInputTokens = VERBOSE ? countTokens(body) : undefined
   const translatedInputTokens = VERBOSE ? countTranslatedTokens(translated) : undefined
+  if (state) {
+    state.lastMessage = {
+      reqId,
+      model: body.model,
+      messageCount,
+      toolCount,
+      localInputTokens,
+      translatedInputTokens,
+    }
+  }
   log.debug("translated request", {
     reqId,
     requestedModel: body.model,
@@ -129,14 +203,22 @@ async function handleMessages(req: Request, reqId: string): Promise<Response> {
     log.info("compaction telemetry", {
       reqId,
       phase: "translated_request",
+      sessionId,
+      sessionSeq,
       requestedModel: body.model,
       resolvedModel,
+      messageCount,
+      toolCount,
       localInputTokens,
       translatedInputTokens,
       inputItems: translated.input.length,
-      toolCount: translated.tools?.length ?? 0,
+      translatedToolCount: translated.tools?.length ?? 0,
       hasInstructions: !!translated.instructions,
-      sessionId,
+      previousCountReqId: state?.lastCount?.reqId,
+      previousCountModel: state?.lastCount?.model,
+      previousCountTokens: state?.lastCount?.tokens,
+      previousCountMessageCount: state?.lastCount?.messageCount,
+      previousCountToolCount: state?.lastCount?.toolCount,
     })
   }
 
@@ -176,15 +258,18 @@ async function handleMessages(req: Request, reqId: string): Promise<Response> {
               reqId,
               phase: "upstream_finish",
               mode: "stream",
+              sessionId,
+              sessionSeq,
               requestedModel: body.model,
               resolvedModel,
+              messageCount,
+              toolCount,
               localInputTokens,
               translatedInputTokens,
               upstreamInputTokens: finish.usage?.input_tokens ?? 0,
               upstreamOutputTokens: finish.usage?.output_tokens ?? 0,
               upstreamCachedInputTokens: finish.usage?.input_tokens_details?.cached_tokens ?? 0,
               stopReason: finish.stopReason,
-              sessionId,
             })
           }
         : undefined,
@@ -206,15 +291,18 @@ async function handleMessages(req: Request, reqId: string): Promise<Response> {
         reqId,
         phase: "upstream_finish",
         mode: "non_stream",
+        sessionId,
+        sessionSeq,
         requestedModel: body.model,
         resolvedModel,
+        messageCount,
+        toolCount,
         localInputTokens,
         translatedInputTokens,
         upstreamInputTokens: result.usage.input_tokens,
         upstreamOutputTokens: result.usage.output_tokens,
         upstreamCachedInputTokens: result.usage.cache_read_input_tokens,
         stopReason: result.stop_reason,
-        sessionId,
       })
     }
     return new Response(JSON.stringify(result), {
