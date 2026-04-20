@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.0.4 (2026-04-20)
+
+- Kimi: reasoning content is now preserved across turns as Anthropic thinking
+  blocks, so Claude Code sees the model's thinking and multi-turn reasoning
+  stays coherent
+- Kimi: thinking is always enabled
+
 ## v0.0.3 (2026-04-20)
 
 - Renamed to `claude-code-proxy` to reflect multi-provider support
