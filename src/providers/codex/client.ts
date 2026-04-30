@@ -1,4 +1,4 @@
-import { CODEX_API_ENDPOINT, ORIGINATOR } from "./auth/constants.ts"
+import { CODEX_API_ENDPOINT, ORIGINATOR as ORIGINATOR_DEFAULT } from "./auth/constants.ts"
 import { forceRefresh, getAuth } from "./auth/manager.ts"
 import type { Logger } from "../../log.ts"
 import type { RequestContext } from "../types.ts"
@@ -62,9 +62,11 @@ async function doFetch(
     "Content-Type": "application/json",
     accept: "text/event-stream",
     authorization: `Bearer ${accessToken}`,
-    originator: ORIGINATOR,
+    originator: process.env.CCP_ORIGINATOR ?? ORIGINATOR_DEFAULT,
     "openai-beta": "responses=experimental",
   })
+  const userAgent = process.env.CCP_USER_AGENT
+  if (userAgent) headers.set("User-Agent", userAgent)
   if (accountId) headers.set("ChatGPT-Account-Id", accountId)
   if (sessionId) {
     headers.set("session_id", sessionId)
