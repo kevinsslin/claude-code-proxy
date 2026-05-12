@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.0.11 (2026-05-12)
+
+- Claude-style aliases such as `haiku`, `sonnet`, and `opus` now default to Codex while still following the provider already active in the current Claude Code session.
+- Mixed Codex and Kimi sessions now keep background alias and token-count requests on the right provider instead of unexpectedly switching providers.
+- Tool results with images, errors, or unsupported blocks are handled more safely, reducing malformed upstream requests.
+
 ## v0.0.10 (2026-05-06)
 
 - Codex requests can now use `codex.serviceTier` or `CCP_CODEX_SERVICE_TIER` to request a service tier; `fast` is sent upstream as `priority`.
