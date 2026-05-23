@@ -41,14 +41,22 @@ interface TextState {
 interface ToolState {
   kind: "tool";
   index: number;
+  outputIndex: number;
   callId: string;
   name: string;
   argsAccum: string;
+  deltaCount: number;
+  startedAt: number;
+  lastProgressLogAt: number;
+  largeArgsLogged: boolean;
   hadDelta: boolean;
   bufferUntilDone: boolean;
   emittedArgs: boolean;
 }
 type BlockState = TextState | ToolState;
+
+const BUFFERED_TOOL_PROGRESS_LOG_INTERVAL_MS = 30_000;
+const BUFFERED_TOOL_LARGE_ARGS_BYTES = 1_000_000;
 
 function shouldBufferToolArgs(name: string): boolean {
   return name === "Read";
@@ -66,6 +74,33 @@ function sanitizeToolArgs(name: string, args: string): string {
   } catch {
     return args;
   }
+}
+
+function toolArgSummary(args: string): Record<string, unknown> {
+  return {
+    length: args.length,
+    prefix: args.slice(0, 120),
+    suffix: args.slice(-120),
+  };
+}
+
+function logBufferedToolProgress(log: Logger, state: ToolState, force = false): void {
+  if (!state.bufferUntilDone) return;
+  const now = Date.now();
+  const large = state.argsAccum.length >= BUFFERED_TOOL_LARGE_ARGS_BYTES && !state.largeArgsLogged;
+  const stale = now - state.lastProgressLogAt >= BUFFERED_TOOL_PROGRESS_LOG_INTERVAL_MS;
+  if (!force && !large && !stale) return;
+  if (large) state.largeArgsLogged = true;
+  state.lastProgressLogAt = now;
+  log.info("buffered tool arguments progress", {
+    outputIndex: state.outputIndex,
+    index: state.index,
+    callId: state.callId,
+    name: state.name,
+    deltaCount: state.deltaCount,
+    elapsedMs: now - state.startedAt,
+    args: toolArgSummary(state.argsAccum),
+  });
 }
 
 /**
@@ -152,15 +187,28 @@ export async function* reduceUpstream(
       if (item.type === "function_call") {
         sawToolUse = true;
         const idx = anthropicIndex++;
+        const bufferUntilDone = shouldBufferToolArgs(item.name);
         blocksByOutputIndex.set(outputIndex, {
           kind: "tool",
           index: idx,
+          outputIndex,
           callId: item.call_id,
           name: item.name,
           argsAccum: "",
+          deltaCount: 0,
+          startedAt: Date.now(),
+          lastProgressLogAt: Date.now(),
+          largeArgsLogged: false,
           hadDelta: false,
-          bufferUntilDone: shouldBufferToolArgs(item.name),
+          bufferUntilDone,
           emittedArgs: false,
+        });
+        log.info("tool block started", {
+          outputIndex,
+          index: idx,
+          callId: item.call_id,
+          name: item.name,
+          bufferUntilDone,
         });
         yield { kind: "tool-start", index: idx, id: item.call_id, name: item.name };
         continue;
@@ -192,7 +240,9 @@ export async function* reduceUpstream(
       const delta: string = p.delta ?? "";
       if (!delta) continue;
       state.argsAccum += delta;
+      state.deltaCount += 1;
       state.hadDelta = true;
+      logBufferedToolProgress(log, state);
       if (!state.bufferUntilDone) {
         state.emittedArgs = true;
         yield { kind: "tool-delta", index: state.index, partialJson: delta };
@@ -208,6 +258,15 @@ export async function* reduceUpstream(
       if (typeof p.arguments === "string" && !state.argsAccum) {
         state.argsAccum = p.arguments;
       }
+      log.info("tool arguments done", {
+        outputIndex: p.output_index,
+        index: state.index,
+        callId: state.callId,
+        name: state.name,
+        deltaCount: state.deltaCount,
+        elapsedMs: Date.now() - state.startedAt,
+        args: toolArgSummary(state.argsAccum),
+      });
       continue;
     }
 
@@ -216,7 +275,10 @@ export async function* reduceUpstream(
       const state = blocksByOutputIndex.get(p.output_index);
       if (!state) continue;
       if (!item) {
-        // defensive
+        log.warn("output item done without item", {
+          outputIndex: p.output_index,
+          stateKind: state.kind,
+        });
         if (state.kind === "text") yield { kind: "text-stop", index: state.index };
         else yield { kind: "tool-stop", index: state.index };
         blocksByOutputIndex.delete(p.output_index);
@@ -228,6 +290,16 @@ export async function* reduceUpstream(
           (typeof item.arguments === "string" && item.arguments.length
             ? item.arguments
             : state.argsAccum) || "";
+        log.info("tool output item done", {
+          outputIndex: p.output_index,
+          index: state.index,
+          callId: state.callId,
+          name: state.name,
+          itemType: item.type,
+          deltaCount: state.deltaCount,
+          elapsedMs: Date.now() - state.startedAt,
+          finalArgs: toolArgSummary(finalArgs),
+        });
         if (finalArgs.length) {
           state.argsAccum = sanitizeToolArgs(state.name, finalArgs);
           if (state.bufferUntilDone || !state.emittedArgs) {
