@@ -8,6 +8,8 @@ import type { RequestContext } from "../types.ts";
 import type { ResponsesRequest } from "./translate/request.ts";
 import { retryOn429 } from "../retry.ts";
 
+const FETCH_WATCHDOG_INTERVAL_MS = 30_000;
+
 export interface CodexResponse {
   body: ReadableStream<Uint8Array>;
   status: number;
@@ -102,12 +104,30 @@ async function doFetch(
     toolCount: body.tools?.length ?? 0,
   });
 
-  return fetch(codexUrl, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-    signal,
-  });
+  const startedAt = Date.now();
+  const watchdog = setInterval(() => {
+    log.info("waiting for codex response headers", {
+      elapsedMs: Date.now() - startedAt,
+      model: body.model,
+      inputCount: body.input.length,
+      toolCount: body.tools?.length ?? 0,
+    });
+  }, FETCH_WATCHDOG_INTERVAL_MS);
+  try {
+    const resp = await fetch(codexUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal,
+    });
+    log.debug("received codex response headers", {
+      status: resp.status,
+      elapsedMs: Date.now() - startedAt,
+    });
+    return resp;
+  } finally {
+    clearInterval(watchdog);
+  }
 }
 
 async function safeText(resp: Response): Promise<string> {

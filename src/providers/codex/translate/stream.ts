@@ -19,6 +19,7 @@ import {
  * surface as SSE error events rather than non-200 statuses.
  */
 const KEEPALIVE_INTERVAL_MS = 15_000;
+const STREAM_WATCHDOG_INTERVAL_MS = 30_000;
 
 export function translateStream(
   upstream: ReadableStream<Uint8Array>,
@@ -43,6 +44,9 @@ export function translateStream(
       let closed = false;
       let messageStarted = false;
       let lastEmitAt = 0;
+      let lastEmitEvent: string | undefined;
+      let lastReducerEvent: string | undefined;
+      const startedAt = Date.now();
       const safeClose = () => {
         if (closed) return;
         closed = true;
@@ -57,6 +61,7 @@ export function translateStream(
         try {
           controller.enqueue(encoder.encode(encodeSseEvent(event, data)));
           lastEmitAt = Date.now();
+          lastEmitEvent = event;
           return true;
         } catch (err) {
           if (opts.signal?.aborted || isClosedControllerError(err)) {
@@ -70,6 +75,20 @@ export function translateStream(
         if (!messageStarted || Date.now() - lastEmitAt < KEEPALIVE_INTERVAL_MS) return;
         emit("ping", { type: "ping" });
       };
+      const logWatchdog = () => {
+        const activeToolCalls = Array.from(activeTools.values());
+        opts.log.info("codex stream watchdog", {
+          elapsedMs: Date.now() - startedAt,
+          activeToolNames: activeToolCalls.map((tool) => tool.name),
+          activeToolCalls,
+          messageStarted,
+          lastReducerEvent,
+          lastEmitEvent,
+          msSinceLastEmit: lastEmitAt ? Date.now() - lastEmitAt : undefined,
+          diagnostics: describeDiagnostics(diagnostics),
+        });
+      };
+      const watchdog = setInterval(logWatchdog, STREAM_WATCHDOG_INTERVAL_MS);
       const ensureMessageStart = () => {
         if (messageStarted) return;
         messageStarted = true;
@@ -96,6 +115,7 @@ export function translateStream(
 
       try {
         for await (const e of reduceUpstream(upstream, opts.log, diagnostics)) {
+          lastReducerEvent = e.kind;
           switch (e.kind) {
             case "text-start":
               ensureMessageStart();
@@ -206,6 +226,7 @@ export function translateStream(
           });
         }
       } finally {
+        clearInterval(watchdog);
         safeClose();
       }
     },
