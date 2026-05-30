@@ -1,6 +1,6 @@
 {
   "name": "claude-code-proxy",
-  "version": "0.0.13",
+  "version": "0.0.14",
   "license": "MIT",
   "bin": {
     "claude-code-proxy": "./src/cli.ts"
