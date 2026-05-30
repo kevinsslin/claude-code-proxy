@@ -1,5 +1,6 @@
 import type { Provider, CliHandlers, RequestContext } from "../types.ts";
 import type { AnthropicRequest } from "../../anthropic/schema.ts";
+import { wantsDownstreamStream } from "../../anthropic/stream.ts";
 import {
   assertAllowedModel,
   ModelNotAllowedError,
@@ -37,7 +38,7 @@ async function handleCountTokens(body: AnthropicRequest, ctx: RequestContext): P
 async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Promise<Response> {
   const log = ctx.childLogger("provider.kimi");
   const messageId = `msg_${crypto.randomUUID().replace(/-/g, "")}`;
-  const wantStream = body.stream !== false;
+  const wantStream = wantsDownstreamStream(body);
   const messageCount = body.messages?.length ?? 0;
   const toolCount = body.tools?.length ?? 0;
 

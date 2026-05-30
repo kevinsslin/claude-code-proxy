@@ -1,4 +1,5 @@
 import type { AnthropicRequest } from "../../anthropic/schema.ts";
+import { wantsDownstreamStream } from "../../anthropic/stream.ts";
 import type { Provider, RequestContext, CliHandlers } from "../types.ts";
 import {
   ALLOWED_MODELS,
@@ -179,7 +180,7 @@ async function handleCountTokens(body: AnthropicRequest, ctx: RequestContext): P
 async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Promise<Response> {
   const log = ctx.childLogger("provider.codex");
   const messageId = `msg_${crypto.randomUUID().replace(/-/g, "")}`;
-  const wantStream = body.stream !== false;
+  const wantStream = wantsDownstreamStream(body);
   const messageCount = body.messages?.length ?? 0;
   const toolCount = body.tools?.length ?? 0;
   const contextManagement = body.context_management;
