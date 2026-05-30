@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.0.14 (2026-05-30)
+
+- Codex streaming now stays responsive during long `Read` tool calls by sending keepalive pings while tool arguments are buffered.
+- Truncated Codex streams now return a clear error instead of appearing to finish successfully with incomplete tool calls.
+- Stalled Codex requests now time out and retry when response headers never arrive, with clearer diagnostics for slow upstream responses.
+
 ## v0.0.13 (2026-05-14)
 
 - Windows users can now download prebuilt `windows-amd64` and `windows-arm64` release archives.
