@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { stateDir } from "../../../paths.ts";
 import { encodeSseEvent } from "../../../sse.ts";
 import type { Logger } from "../../../log.ts";
+import type { CodexRequestSizeSummary } from "../request-summary.ts";
 import {
   createUpstreamStreamDiagnostics,
   mapUsageToAnthropic,
@@ -30,6 +31,7 @@ export function translateStream(
     reqId?: string;
     signal?: AbortSignal;
     upstreamHeaders?: Headers;
+    requestSize?: CodexRequestSizeSummary;
     onFinish?: (finish: {
       stopReason: "end_turn" | "tool_use" | "max_tokens";
       usage?: Parameters<typeof mapUsageToAnthropic>[0];
@@ -199,7 +201,10 @@ export function translateStream(
             block.type === "tool" && typeof block.id === "string" && typeof block.name === "string",
         );
         const activeToolNames = activeToolCalls.map((tool) => tool.name);
-        const openBlockDetails = Array.from(openBlocks.entries(), ([index, block]) => ({ index, ...block }));
+        const openBlockDetails = Array.from(openBlocks.entries(), ([index, block]) => ({
+          index,
+          ...block,
+        }));
         if (opts.signal?.aborted) {
           opts.log.info("stream cancelled", {
             err: describeError(err),
@@ -220,8 +225,13 @@ export function translateStream(
             clientAborted: opts.signal?.aborted ?? false,
             diagnostics: describeDiagnostics(diagnostics),
             upstreamHeaders: describeHeaders(opts.upstreamHeaders),
+            requestSize: opts.requestSize,
           };
-          const diagnosticFile = await writeDiagnosticFile(opts.reqId, "upstream-stream-error", detail);
+          const diagnosticFile = await writeDiagnosticFile(
+            opts.reqId,
+            "upstream-stream-error",
+            detail,
+          );
           opts.log.warn("upstream stream error", { ...detail, diagnosticFile });
           ensureMessageStart();
           closeOpenBlocks();
@@ -241,8 +251,13 @@ export function translateStream(
             clientAborted: opts.signal?.aborted ?? false,
             diagnostics: describeDiagnostics(diagnostics),
             upstreamHeaders: describeHeaders(opts.upstreamHeaders),
+            requestSize: opts.requestSize,
           };
-          const diagnosticFile = await writeDiagnosticFile(opts.reqId, "stream-translation-error", detail);
+          const diagnosticFile = await writeDiagnosticFile(
+            opts.reqId,
+            "stream-translation-error",
+            detail,
+          );
           opts.log.error("stream translation error", { ...detail, diagnosticFile });
           ensureMessageStart();
           closeOpenBlocks();
@@ -270,8 +285,12 @@ function describeDiagnostics(diagnostics: ReturnType<typeof createUpstreamStream
     chunkCount: diagnostics.stats.chunkCount,
     eventCount: diagnostics.stats.eventCount,
     durationMs: now - diagnostics.stats.startedAt,
-    msSinceLastChunk: diagnostics.stats.lastChunkAt ? now - diagnostics.stats.lastChunkAt : undefined,
-    msSinceLastEvent: diagnostics.stats.lastEventAt ? now - diagnostics.stats.lastEventAt : undefined,
+    msSinceLastChunk: diagnostics.stats.lastChunkAt
+      ? now - diagnostics.stats.lastChunkAt
+      : undefined,
+    msSinceLastEvent: diagnostics.stats.lastEventAt
+      ? now - diagnostics.stats.lastEventAt
+      : undefined,
     lastEventType: diagnostics.lastEventType,
     sawTerminalEvent: diagnostics.sawTerminalEvent,
   };
@@ -295,8 +314,14 @@ async function writeDiagnosticFile(
     const dir = join(stateDir(), "diagnostics");
     await mkdir(dir, { recursive: true });
     const safeReqId = reqId?.replace(/[^a-zA-Z0-9._-]/g, "_") || "unknown";
-    const file = join(dir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${safeReqId}-${kind}.json`);
-    await writeFile(file, JSON.stringify({ t: new Date().toISOString(), kind, reqId, ...detail }, null, 2));
+    const file = join(
+      dir,
+      `${new Date().toISOString().replace(/[:.]/g, "-")}-${safeReqId}-${kind}.json`,
+    );
+    await writeFile(
+      file,
+      JSON.stringify({ t: new Date().toISOString(), kind, reqId, ...detail }, null, 2),
+    );
     return file;
   } catch {
     return undefined;

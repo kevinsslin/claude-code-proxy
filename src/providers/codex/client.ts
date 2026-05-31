@@ -7,6 +7,7 @@ import type { Logger } from "../../log.ts";
 import type { RequestContext } from "../types.ts";
 import type { ResponsesRequest } from "./translate/request.ts";
 import { retryOn429, sleep } from "../retry.ts";
+import { summarizeCodexRequestSize } from "./request-summary.ts";
 
 const FETCH_WATCHDOG_INTERVAL_MS = 30_000;
 let fetchHeaderTimeoutMs = 60_000;
@@ -54,7 +55,8 @@ async function retryHeaderTimeouts(
     try {
       return await run();
     } catch (err) {
-      if (!(err instanceof CodexHeaderTimeoutError) || attempt >= fetchHeaderTimeoutRetries) throw err;
+      if (!(err instanceof CodexHeaderTimeoutError) || attempt >= fetchHeaderTimeoutRetries)
+        throw err;
       const waitMs = fetchHeaderTimeoutMs <= 10 ? 0 : 500 + Math.round(Math.random() * 1000);
       log.warn("codex response headers timed out, retrying", {
         attempt: attempt + 1,
@@ -64,6 +66,7 @@ async function retryHeaderTimeouts(
         model: body.model,
         inputCount: body.input.length,
         toolCount: body.tools?.length ?? 0,
+        requestSize: summarizeCodexRequestSize(body),
       });
       await sleep(waitMs, signal);
     }
@@ -136,11 +139,18 @@ async function doFetch(
 
   const codexUrl = codexBaseUrl(CODEX_API_ENDPOINT);
 
+  const bodyJson = JSON.stringify(body);
+  const size = summarizeCodexRequestSize(body, bodyJson);
+
   log.debug("posting to codex", {
     url: codexUrl,
     model: body.model,
     inputCount: body.input.length,
     toolCount: body.tools?.length ?? 0,
+    serviceTier: body.service_tier,
+    reasoningEffort: body.reasoning?.effort,
+    promptCacheKey: body.prompt_cache_key,
+    size,
   });
 
   const startedAt = Date.now();
@@ -162,7 +172,7 @@ async function doFetch(
     const resp = await fetch(codexUrl, {
       method: "POST",
       headers,
-      body: JSON.stringify(body),
+      body: bodyJson,
       signal: headerTimeout.signal,
     });
     log.debug("received codex response headers", {

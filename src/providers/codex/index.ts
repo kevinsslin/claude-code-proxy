@@ -14,6 +14,7 @@ import { accumulateResponse, UpstreamStreamError } from "./translate/accumulate.
 import { mapUsageToAnthropic } from "./translate/reducer.ts";
 import { CodexError, postCodex } from "./client.ts";
 import { countTokens, countTranslatedTokens } from "./count-tokens.ts";
+import { summarizeCodexRequestSize } from "./request-summary.ts";
 import { runBrowserLogin } from "./auth/pkce.ts";
 import { runDeviceLogin } from "./auth/device.ts";
 import { persistInitialTokens } from "./auth/manager.ts";
@@ -54,7 +55,9 @@ function sessionState(sessionId?: string): SessionTimelineState | undefined {
   return state;
 }
 
-function readToolSchemaSummary(tools: { name: string; parameters: unknown; strict?: boolean }[] | undefined) {
+function readToolSchemaSummary(
+  tools: { name: string; parameters: unknown; strict?: boolean }[] | undefined,
+) {
   const read = tools?.find((tool) => tool.name === "Read");
   if (!read) return undefined;
   const parameters = read.parameters;
@@ -218,6 +221,7 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
     if (err instanceof InvalidServiceTierError) return invalidServiceTierResponse(err);
     throw err;
   }
+  const requestSize = summarizeCodexRequestSize(translated);
   const localInputTokens = logVerbose() ? countTokens(body) : undefined;
   const translatedInputTokens = logVerbose() ? countTranslatedTokens(translated) : undefined;
   if (state) {
@@ -240,6 +244,7 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
     requestedMaxTokens: body.max_tokens,
     hasContextManagement: contextManagement !== undefined,
     promptCacheKey: translated.prompt_cache_key,
+    requestSize,
   });
   if (logVerbose()) log.debug("translated request body", { body: translated });
   if (logVerbose()) {
@@ -258,6 +263,7 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
       requestedMaxTokens: body.max_tokens,
       hasContextManagement: contextManagement !== undefined,
       contextManagement,
+      requestSize,
       previousCountReqId: state?.lastCount?.reqId,
       previousCountModel: state?.lastCount?.model,
       previousCountTokens: state?.lastCount?.tokens,
@@ -298,6 +304,7 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
       reqId: ctx.reqId,
       signal: ctx.signal,
       upstreamHeaders: upstream.headers,
+      requestSize,
       onFinish: logVerbose()
         ? (finish) => {
             const mappedUsage = finish.usage ? mapUsageToAnthropic(finish.usage) : undefined;
