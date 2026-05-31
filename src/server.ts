@@ -1,4 +1,5 @@
 import { createLogger, logDir, REDACT_KEYS } from "./log.ts";
+import { createTrafficCapture, headersToRecord } from "./traffic.ts";
 
 import type { AnthropicRequest } from "./anthropic/schema.ts";
 import type { AliasProvider } from "./config.ts";
@@ -116,32 +117,35 @@ async function route(req: Request, url: URL, reqId: string): Promise<Response> {
   }
 
   if (req.method === "POST" && url.pathname === "/v1/messages/count_tokens") {
-    const body = await parseJsonBody(req);
-    if (body instanceof Response) return body;
-    const sessionId = req.headers.get("x-claude-code-session-id") || undefined;
-    const session = existingSession(sessionId);
-    const provider = routeProvider(body, reqId, session?.affinityProvider);
-    if (provider instanceof Response) return provider;
-    const current = recordSessionRequest(sessionId, session, provider.name, body.model);
-    const ctx = buildCtx(req, reqId, provider.name, sessionId, current);
-    ctx.childLogger("server").info("dispatch", { model: body.model });
-    return provider.handleCountTokens(body, ctx);
+    return routeAnthropicPost(req, url, reqId, "count_tokens");
   }
 
   if (req.method === "POST" && url.pathname === "/v1/messages") {
-    const body = await parseJsonBody(req);
-    if (body instanceof Response) return body;
-    const sessionId = req.headers.get("x-claude-code-session-id") || undefined;
-    const session = existingSession(sessionId);
-    const provider = routeProvider(body, reqId, session?.affinityProvider);
-    if (provider instanceof Response) return provider;
-    const current = recordSessionRequest(sessionId, session, provider.name, body.model);
-    const ctx = buildCtx(req, reqId, provider.name, sessionId, current);
-    ctx.childLogger("server").info("dispatch", { model: body.model });
-    return provider.handleMessages(body, ctx);
+    return routeAnthropicPost(req, url, reqId, "messages");
   }
 
   return jsonError(404, "not_found", `No route for ${req.method} ${url.pathname}`);
+}
+
+async function routeAnthropicPost(
+  req: Request,
+  url: URL,
+  reqId: string,
+  kind: "messages" | "count_tokens",
+): Promise<Response> {
+  const body = await parseJsonBody(req);
+  if (body instanceof Response) return body;
+  const sessionId = req.headers.get("x-claude-code-session-id") || undefined;
+  const session = existingSession(sessionId);
+  const provider = routeProvider(body, reqId, session?.affinityProvider);
+  if (provider instanceof Response) return provider;
+  const current = recordSessionRequest(sessionId, session, provider.name, body.model);
+  const ctx = buildCtx(req, reqId, provider.name, sessionId, current);
+  captureInboundTraffic(ctx, req, url, body, kind, provider.name);
+  ctx.childLogger("server").info("dispatch", { model: body.model });
+  return kind === "messages"
+    ? provider.handleMessages(body, ctx)
+    : provider.handleCountTokens(body, ctx);
 }
 
 function buildCtx(
@@ -158,8 +162,33 @@ function buildCtx(
     sessionId,
     sessionSeq,
     signal: req.signal,
+    traffic: createTrafficCapture({ reqId, sessionId, sessionSeq, provider: providerName }),
     childLogger: (service) => createLogger(service, bindings),
   };
+}
+
+function captureInboundTraffic(
+  ctx: RequestContext,
+  req: Request,
+  url: URL,
+  body: AnthropicRequest,
+  kind: "messages" | "count_tokens",
+  provider: string,
+): void {
+  if (!ctx.traffic) return;
+  ctx.traffic.writeJson("000-metadata", {
+    reqId: ctx.reqId,
+    sessionId: ctx.sessionId,
+    sessionSeq: ctx.sessionSeq,
+    kind,
+    provider,
+    model: body.model,
+    method: req.method,
+    path: url.pathname,
+    query: redactedQuery(url),
+    headers: headersToRecord(req.headers),
+  });
+  ctx.traffic.writeJson("010-anthropic-request", body);
 }
 
 // Claude Code uses a [1m] suffix convention (e.g. "gpt-5.4[1m]") to

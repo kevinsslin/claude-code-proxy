@@ -1,5 +1,6 @@
 import { parseSseStream } from "../../../sse.ts";
 import type { Logger } from "../../../log.ts";
+import type { TrafficCapture } from "../../types.ts";
 
 export class UpstreamStreamError extends Error {
   constructor(
@@ -67,6 +68,7 @@ interface ToolSlot {
  */
 export interface ReducerStats {
   chunkCount: number;
+  traffic?: TrafficCapture;
 }
 
 export async function* reduceUpstream(
@@ -117,7 +119,10 @@ export async function* reduceUpstream(
       continue;
     }
 
-    if (stats) stats.chunkCount++;
+    if (stats) {
+      stats.chunkCount++;
+      stats.traffic?.writeJson("040-upstream-event", chunk);
+    }
 
     if (chunk.error) {
       throw new UpstreamStreamError("failed", chunk.error.message || "Upstream error");

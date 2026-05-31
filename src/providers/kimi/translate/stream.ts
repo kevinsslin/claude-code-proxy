@@ -1,5 +1,6 @@
 import { encodeSseEvent } from "../../../sse.ts";
 import type { Logger } from "../../../log.ts";
+import type { TrafficCapture } from "../../types.ts";
 import {
   mapUsageToAnthropic,
   reduceUpstream,
@@ -25,6 +26,7 @@ export function translateStream(
     model: string;
     log: Logger;
     requestStartTime?: number;
+    traffic?: TrafficCapture;
     onFinish?: (finish: {
       stopReason: "end_turn" | "tool_use" | "max_tokens";
       usage?: Parameters<typeof mapUsageToAnthropic>[0];
@@ -35,6 +37,7 @@ export function translateStream(
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       const emit = (event: string, data: unknown) => {
+        opts.traffic?.writeJson("050-downstream-event", { event, data });
         controller.enqueue(encoder.encode(encodeSseEvent(event, data)));
       };
       const activeTools = new Map<number, { id: string; name: string }>();
@@ -70,7 +73,7 @@ export function translateStream(
       let toolCount = 0;
       let finishUsage: KimiUsage | undefined;
       let finishStopReason: string | undefined;
-      const stats = { chunkCount: 0 };
+      const stats = { chunkCount: 0, traffic: opts.traffic };
 
       try {
         for await (const e of reduceUpstream(upstream, stats, opts.log)) {

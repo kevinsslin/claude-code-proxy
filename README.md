@@ -492,6 +492,7 @@ Windows, and at
 | `XDG_STATE_HOME`         | —                   | `~/.local/state`                                  | Linux/macOS base dir for `proxy.log`                                                                             |
 | `CCP_LOG_STDERR`         | `log.stderr`        | unset                                             | Also mirror log lines to stderr                                                                                  |
 | `CCP_LOG_VERBOSE`        | `log.verbose`       | unset                                             | Log full request/response bodies + every SSE event                                                               |
+| `CCP_TRAFFIC_LOG`        | —                   | unset                                             | Write per-request traffic captures under `traffic/` for session debugging                                        |
 | `CCP_ALIAS_PROVIDER`     | `aliasProvider`     | `codex`                                           | Route Anthropic-style aliases (`haiku`, `sonnet`, `opus`, `claude-*`) through `codex` or `kimi`                  |
 | `CCP_KIMI_OAUTH_HOST`    | `kimi.oauthHost`    | `https://auth.kimi.com`                           | Override Kimi's OAuth host (debugging only)                                                                      |
 | `CCP_KIMI_BASE_URL`      | `kimi.baseUrl`      | `https://api.kimi.com/coding/v1`                  | Override Kimi's API base URL                                                                                     |
@@ -516,6 +517,12 @@ affecting other keys.
   `%LOCALAPPDATA%\claude-code-proxy\proxy.log` on Windows (falling back to
   `%USERPROFILE%\AppData\Local`). Secrets (`authorization`, `access`,
   `refresh`, `id_token`, `ChatGPT-Account-Id`, …) are redacted before write.
+- `traffic/` — per-request captures written when `CCP_TRAFFIC_LOG=1` is set.
+  Captures live under the state directory, grouped by Claude Code session and
+  request sequence. They include inbound Anthropic requests, translated upstream
+  requests, upstream headers, upstream events, and downstream events. Token and
+  account headers are redacted, but prompt and tool content are intentionally
+  preserved for debugging.
 - `config.json` — optional configuration file (see table above). It lives at
   `~/.config/claude-code-proxy/config.json` on macOS,
   `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/config.json` on Linux,

@@ -304,6 +304,7 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
       reqId: ctx.reqId,
       signal: ctx.signal,
       upstreamHeaders: upstream.headers,
+      traffic: ctx.traffic,
       requestSize,
       onFinish: logVerbose()
         ? (finish) => {
@@ -350,6 +351,7 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
       messageId,
       model: body.model,
       log: ctx.childLogger("codex.accumulate"),
+      traffic: ctx.traffic,
     });
     if (logVerbose()) {
       const { serverModel, serverReasoningIncluded } = upstreamHeaderSnapshot(upstream.headers);

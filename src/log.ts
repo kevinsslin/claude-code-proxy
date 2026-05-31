@@ -15,6 +15,8 @@ export const REDACT_KEYS = new Set([
   "code",
   "code_verifier",
   "chatgpt-account-id",
+  "cookie",
+  "set-cookie",
   "x-api-key",
 ]);
 

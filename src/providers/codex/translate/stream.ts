@@ -3,8 +3,10 @@ import { join } from "node:path";
 import { stateDir } from "../../../paths.ts";
 import { encodeSseEvent } from "../../../sse.ts";
 import type { Logger } from "../../../log.ts";
+import type { TrafficCapture } from "../../types.ts";
 import type { CodexRequestSizeSummary } from "../request-summary.ts";
 import {
+  attachTrafficCapture,
   createUpstreamStreamDiagnostics,
   mapUsageToAnthropic,
   reduceUpstream,
@@ -31,6 +33,7 @@ export function translateStream(
     reqId?: string;
     signal?: AbortSignal;
     upstreamHeaders?: Headers;
+    traffic?: TrafficCapture;
     requestSize?: CodexRequestSizeSummary;
     onFinish?: (finish: {
       stopReason: "end_turn" | "tool_use" | "max_tokens";
@@ -42,7 +45,7 @@ export function translateStream(
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       const openBlocks = new Map<number, { type: "text" | "tool"; id?: string; name?: string }>();
-      const diagnostics = createUpstreamStreamDiagnostics();
+      const diagnostics = attachTrafficCapture(createUpstreamStreamDiagnostics(), opts.traffic);
       let closed = false;
       let messageStarted = false;
       let lastEmitAt = 0;
@@ -61,6 +64,7 @@ export function translateStream(
       const emit = (event: string, data: unknown) => {
         if (closed || opts.signal?.aborted || controller.desiredSize === null) return false;
         try {
+          opts.traffic?.writeJson("050-downstream-event", { event, data });
           controller.enqueue(encoder.encode(encodeSseEvent(event, data)));
           lastEmitAt = Date.now();
           lastEmitEvent = event;

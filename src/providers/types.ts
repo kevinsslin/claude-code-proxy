@@ -2,11 +2,18 @@ import type { AnthropicRequest } from "../anthropic/schema.ts";
 
 import type { Logger } from "../log.ts";
 
+export interface TrafficCapture {
+  writeJson(name: string, value: unknown): void;
+  writeText(name: string, value: string): void;
+  writeBytes(name: string, value: Uint8Array): void;
+}
+
 export interface RequestContext {
   reqId: string;
   sessionId?: string;
   sessionSeq?: number;
   signal: AbortSignal;
+  traffic?: TrafficCapture;
   childLogger(service: string): Logger;
 }
 

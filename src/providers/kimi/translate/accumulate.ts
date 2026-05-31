@@ -1,5 +1,6 @@
 import { mapUsageToAnthropic, reduceUpstream, type KimiUsage } from "./reducer.ts";
 import { makeThinkingSignature } from "./signature.ts";
+import type { TrafficCapture } from "../../types.ts";
 
 export { UpstreamStreamError } from "./reducer.ts";
 
@@ -32,7 +33,7 @@ import type { Logger } from "../../../log.ts";
 
 export async function accumulateResponse(
   upstream: ReadableStream<Uint8Array>,
-  opts: { messageId: string; model: string; log: Logger },
+  opts: { messageId: string; model: string; log: Logger; traffic?: TrafficCapture },
 ): Promise<AccumulatedResponse> {
   type Block =
     | { kind: "thinking"; text: string }
@@ -47,7 +48,7 @@ export async function accumulateResponse(
   let reasoningChars = 0;
   let contentChars = 0;
   let toolCount = 0;
-  const stats = { chunkCount: 0 };
+  const stats = { chunkCount: 0, traffic: opts.traffic };
 
   for await (const e of reduceUpstream(upstream, stats, opts.log)) {
     switch (e.kind) {

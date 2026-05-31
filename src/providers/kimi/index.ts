@@ -114,6 +114,7 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
       model: body.model,
       log: ctx.childLogger("kimi.stream"),
       requestStartTime: upstream.requestStartTime,
+      traffic: ctx.traffic,
       onFinish: (finish) => {
         const mappedUsage = finish.usage ? mapUsageToAnthropic(finish.usage) : undefined;
         log.debug("stream finish", {
@@ -144,6 +145,7 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
       messageId,
       model: body.model,
       log: ctx.childLogger("kimi.accumulate"),
+      traffic: ctx.traffic,
     });
     return new Response(JSON.stringify(result.response), {
       headers: { "content-type": "application/json" },

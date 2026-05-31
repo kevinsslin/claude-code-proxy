@@ -1,6 +1,7 @@
 import { createSseStreamStats, parseSseStream, type SseStreamStats } from "../../../sse.ts";
 import type { Logger } from "../../../log.ts";
 import { logVerbose } from "../../../config.ts";
+import type { TrafficCapture } from "../../types.ts";
 
 export class UpstreamStreamError extends Error {
   constructor(
@@ -95,7 +96,10 @@ function toolArgJsonState(args: string): Record<string, unknown> {
     const parsed = JSON.parse(trimmed);
     return {
       parseOk: true,
-      parsedKeys: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? Object.keys(parsed) : undefined,
+      parsedKeys:
+        parsed && typeof parsed === "object" && !Array.isArray(parsed)
+          ? Object.keys(parsed)
+          : undefined,
       trimmedLength: trimmed.length,
       trailingWhitespace: args.length - trimmed.length,
     };
@@ -131,7 +135,11 @@ function logBufferedToolProgress(log: Logger, state: ToolState, force = false): 
 function throwIfBufferedToolExceeded(log: Logger, state: ToolState): void {
   if (!state.bufferUntilDone) return;
   const elapsedMs = Date.now() - state.startedAt;
-  if (state.argsAccum.length <= BUFFERED_TOOL_MAX_ARGS_BYTES && elapsedMs <= BUFFERED_TOOL_MAX_DURATION_MS) return;
+  if (
+    state.argsAccum.length <= BUFFERED_TOOL_MAX_ARGS_BYTES &&
+    elapsedMs <= BUFFERED_TOOL_MAX_DURATION_MS
+  )
+    return;
   log.warn("buffered tool arguments exceeded safe limits", {
     outputIndex: state.outputIndex,
     index: state.index,
@@ -185,6 +193,7 @@ export interface UpstreamStreamDiagnostics {
   stats: SseStreamStats;
   lastEventType?: string;
   sawTerminalEvent: boolean;
+  traffic?: TrafficCapture;
 }
 
 export function createUpstreamStreamDiagnostics(): UpstreamStreamDiagnostics {
@@ -192,6 +201,14 @@ export function createUpstreamStreamDiagnostics(): UpstreamStreamDiagnostics {
     stats: createSseStreamStats(),
     sawTerminalEvent: false,
   };
+}
+
+export function attachTrafficCapture(
+  diagnostics: UpstreamStreamDiagnostics,
+  traffic: TrafficCapture | undefined,
+): UpstreamStreamDiagnostics {
+  diagnostics.traffic = traffic;
+  return diagnostics;
 }
 
 export async function* reduceUpstream(
@@ -217,6 +234,7 @@ export async function* reduceUpstream(
     }
     const t: string = p.type || evt.event || "";
     diagnostics.lastEventType = t;
+    diagnostics.traffic?.writeJson("040-upstream-event", p);
 
     if (logVerbose())
       log.debug("upstream event", { type: t, output_index: p.output_index, item_id: p.item_id });

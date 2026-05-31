@@ -7,6 +7,7 @@ import type { Logger } from "../../log.ts";
 import type { RequestContext } from "../types.ts";
 import type { ResponsesRequest } from "./translate/request.ts";
 import { retryOn429, sleep } from "../retry.ts";
+import { headersToRecord } from "../../traffic.ts";
 import { summarizeCodexRequestSize } from "./request-summary.ts";
 
 const FETCH_WATCHDOG_INTERVAL_MS = 30_000;
@@ -79,13 +80,13 @@ async function attemptPostCodex(
   log: Logger,
 ): Promise<CodexResponse> {
   let auth = await getAuth();
-  let resp = await doFetch(auth.access, auth.accountId, body, log, ctx.signal, ctx.sessionId);
+  let resp = await doFetch(auth.access, auth.accountId, body, ctx, log);
 
   if (resp.status === 401) {
     log.warn("got 401, refreshing token", {});
     try {
       auth = await forceRefresh();
-      resp = await doFetch(auth.access, auth.accountId, body, log, ctx.signal, ctx.sessionId);
+      resp = await doFetch(auth.access, auth.accountId, body, ctx, log);
     } catch (err) {
       log.error("refresh after 401 failed", { err: String(err) });
     }
@@ -93,6 +94,7 @@ async function attemptPostCodex(
 
   if (resp.status === 403) {
     const text = await safeText(resp);
+    ctx.traffic?.writeText("031-upstream-error-body", text);
     log.error("403 from upstream (non-refreshable)", { body: text });
     throw new CodexError(403, "Forbidden", text);
   }
@@ -100,11 +102,13 @@ async function attemptPostCodex(
   if (resp.status === 429) {
     const retryAfter = resp.headers.get("retry-after") || undefined;
     const text = await safeText(resp);
+    ctx.traffic?.writeText("031-upstream-error-body", text);
     throw new CodexError(429, "Rate limited", text, { retryAfter });
   }
 
   if (!resp.ok) {
     const text = await safeText(resp);
+    ctx.traffic?.writeText("031-upstream-error-body", text);
     throw new CodexError(resp.status, "Upstream error", text);
   }
 
@@ -117,9 +121,8 @@ async function doFetch(
   accessToken: string,
   accountId: string | undefined,
   body: ResponsesRequest,
+  ctx: RequestContext,
   log: Logger,
-  signal?: AbortSignal,
-  sessionId?: string,
 ): Promise<Response> {
   const headers = new Headers({
     "Content-Type": "application/json",
@@ -131,16 +134,24 @@ async function doFetch(
   const userAgent = codexUserAgent(`claude-code-proxy/${PROXY_VERSION}`);
   if (userAgent) headers.set("User-Agent", userAgent);
   if (accountId) headers.set("ChatGPT-Account-Id", accountId);
-  if (sessionId) {
-    headers.set("session_id", sessionId);
-    headers.set("x-client-request-id", sessionId);
-    headers.set("x-codex-window-id", `${sessionId}:0`);
+  if (ctx.sessionId) {
+    headers.set("session_id", ctx.sessionId);
+    headers.set("x-client-request-id", ctx.sessionId);
+    headers.set("x-codex-window-id", `${ctx.sessionId}:0`);
   }
 
   const codexUrl = codexBaseUrl(CODEX_API_ENDPOINT);
 
   const bodyJson = JSON.stringify(body);
   const size = summarizeCodexRequestSize(body, bodyJson);
+  ctx.traffic?.writeJson("020-upstream-request", body);
+  ctx.traffic?.writeJson("021-upstream-request-metadata", {
+    provider: "codex",
+    url: codexUrl,
+    method: "POST",
+    headers: headersToRecord(headers),
+    size,
+  });
 
   log.debug("posting to codex", {
     url: codexUrl,
@@ -166,8 +177,8 @@ async function doFetch(
   const timeout = setTimeout(() => {
     headerTimeout.abort(new CodexHeaderTimeoutError(fetchHeaderTimeoutMs));
   }, fetchHeaderTimeoutMs);
-  const onAbort = () => headerTimeout.abort(signal?.reason);
-  signal?.addEventListener("abort", onAbort, { once: true });
+  const onAbort = () => headerTimeout.abort(ctx.signal.reason);
+  ctx.signal.addEventListener("abort", onAbort, { once: true });
   try {
     const resp = await fetch(codexUrl, {
       method: "POST",
@@ -175,9 +186,16 @@ async function doFetch(
       body: bodyJson,
       signal: headerTimeout.signal,
     });
+    const elapsedMs = Date.now() - startedAt;
+    ctx.traffic?.writeJson("030-upstream-response-headers", {
+      status: resp.status,
+      statusText: resp.statusText,
+      elapsedMs,
+      headers: headersToRecord(resp.headers),
+    });
     log.debug("received codex response headers", {
       status: resp.status,
-      elapsedMs: Date.now() - startedAt,
+      elapsedMs,
     });
     return resp;
   } catch (err) {
@@ -186,7 +204,7 @@ async function doFetch(
     }
     throw err;
   } finally {
-    signal?.removeEventListener("abort", onAbort);
+    ctx.signal.removeEventListener("abort", onAbort);
     clearTimeout(timeout);
     clearInterval(watchdog);
   }

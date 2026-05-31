@@ -1,6 +1,8 @@
 import { mapUsageToAnthropic, reduceUpstream } from "./reducer.ts";
 import type { CodexUsage } from "./reducer.ts";
 import type { Logger } from "../../../log.ts";
+import type { TrafficCapture } from "../../types.ts";
+import { attachTrafficCapture, createUpstreamStreamDiagnostics } from "./reducer.ts";
 
 export { UpstreamStreamError } from "./reducer.ts";
 
@@ -35,7 +37,7 @@ export interface AccumulatedResponse {
  */
 export async function accumulateResponse(
   upstream: ReadableStream<Uint8Array>,
-  opts: { messageId: string; model: string; log: Logger },
+  opts: { messageId: string; model: string; log: Logger; traffic?: TrafficCapture },
 ): Promise<AccumulatedResponse> {
   type Block =
     | { kind: "text"; text: string }
@@ -47,7 +49,9 @@ export async function accumulateResponse(
   let usage: ReturnType<typeof mapUsageToAnthropic> | undefined;
   let rawUsage: CodexUsage | undefined;
 
-  for await (const e of reduceUpstream(upstream, opts.log)) {
+  const diagnostics = attachTrafficCapture(createUpstreamStreamDiagnostics(), opts.traffic);
+
+  for await (const e of reduceUpstream(upstream, opts.log, diagnostics)) {
     switch (e.kind) {
       case "text-start":
         blocks.set(e.index, { kind: "text", text: "" });
