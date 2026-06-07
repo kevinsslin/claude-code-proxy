@@ -4,12 +4,14 @@ import type { createLogger } from "./log.ts";
 import { startServer, normalizeIncomingModel, wrapStreamResponse } from "./server.ts";
 import { groupSupportedModelsByProvider } from "./providers/registry.ts";
 import { startTestServer } from "./test/server.ts";
+import { resetSessionsForTest } from "./server/session-affinity.ts";
 
 const servers: Array<{ stop: () => void }> = [];
 
 afterEach(() => {
   for (const server of servers.splice(0)) server.stop();
   loadConfig({ forceReload: true });
+  resetSessionsForTest();
 });
 
 function countTokens(port: number, model: string, sessionId?: string): Promise<Response> {

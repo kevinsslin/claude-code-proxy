@@ -6,11 +6,15 @@ import type { AnthropicRequest } from "./anthropic/schema.ts";
 import type { AliasProvider } from "./config.ts";
 import type { Provider, RequestContext } from "./providers/types.ts";
 import {
-  ANTHROPIC_STYLE_ALIASES,
   groupSupportedModelsByProvider,
   normalizeIncomingModel,
   providerForModel,
 } from "./providers/registry.ts";
+import {
+  existingSession,
+  recordSessionRequest,
+  type SessionState,
+} from "./server/session-affinity.ts";
 
 export { normalizeIncomingModel };
 
@@ -18,61 +22,6 @@ const rootLog = createLogger("server");
 
 export interface ServeOptions {
   port: number;
-}
-
-interface SessionState {
-  seq: number;
-  affinityProvider?: AliasProvider;
-  lastSeen: number;
-}
-
-const SESSION_IDLE_TTL_MS = 30 * 60 * 1000;
-const MAX_SESSIONS = 10_000;
-const sessions = new Map<string, SessionState>();
-
-function existingSession(
-  sessionId: string | undefined,
-  now = Date.now(),
-): SessionState | undefined {
-  if (!sessionId) return undefined;
-  const state = sessions.get(sessionId);
-  if (!state) return undefined;
-  if (now - state.lastSeen <= SESSION_IDLE_TTL_MS) return state;
-  sessions.delete(sessionId);
-  return undefined;
-}
-
-function recordSessionRequest(
-  sessionId: string | undefined,
-  session: SessionState | undefined,
-  providerName: string,
-  model: string,
-  now = Date.now(),
-): SessionState | undefined {
-  if (!sessionId) return undefined;
-  const state = session ?? { seq: 0, lastSeen: now };
-  state.seq += 1;
-  state.lastSeen = now;
-  const affinityProvider = affinityProviderFor(providerName);
-  if (affinityProvider && !ANTHROPIC_STYLE_ALIASES.has(model)) {
-    state.affinityProvider = affinityProvider;
-  }
-  sessions.set(sessionId, state);
-  evictOldestSessions();
-  return state;
-}
-
-function affinityProviderFor(providerName: string): AliasProvider | undefined {
-  if (providerName === "codex" || providerName === "kimi") return providerName;
-  return undefined;
-}
-
-function evictOldestSessions(): void {
-  while (sessions.size > MAX_SESSIONS) {
-    const oldestSessionId = sessions.keys().next().value;
-    if (!oldestSessionId) return;
-    sessions.delete(oldestSessionId);
-  }
 }
 
 export function startServer(opts: ServeOptions): { stop: () => void; port: number } {
