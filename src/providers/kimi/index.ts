@@ -1,4 +1,4 @@
-import type { Provider, CliHandlers, RequestContext } from "../types.ts";
+import type { Provider, RequestContext } from "../types.ts";
 import type { AnthropicRequest } from "../../anthropic/schema.ts";
 import { wantsDownstreamStream } from "../../anthropic/stream.ts";
 import {
@@ -18,10 +18,8 @@ import { accumulateResponse, UpstreamStreamError } from "./translate/accumulate.
 import { mapUsageToAnthropic } from "./translate/reducer.ts";
 import { countTokens, countTranslatedTokens } from "./count-tokens.ts";
 import { KimiError, postKimi } from "./client.ts";
-import { runDeviceLogin } from "./auth/login.ts";
-import { persistInitialTokens } from "./auth/manager.ts";
-import { loadAuth, clearAuth, authPath } from "./auth/token-store.ts";
 import { logVerbose } from "../../config.ts";
+import { kimiCli } from "./cli.ts";
 
 async function handleCountTokens(body: AnthropicRequest, ctx: RequestContext): Promise<Response> {
   const log = ctx.childLogger("provider.kimi");
@@ -158,37 +156,10 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
   }
 }
 
-const cli: CliHandlers = {
-  async login() {
-    const tokens = await runDeviceLogin();
-    const saved = await persistInitialTokens(tokens);
-    console.log(`Auth saved in ${authPath()}`);
-    if (saved.userId) console.log(`User: ${saved.userId}`);
-    const secs = Math.floor((saved.expires - Date.now()) / 1000);
-    console.log(`Expires in ${secs}s`);
-  },
-  async status() {
-    const auth = await loadAuth();
-    if (!auth) {
-      console.log("Not authenticated");
-      process.exit(1);
-    }
-    const ms = auth.expires - Date.now();
-    console.log(`User: ${auth.userId ?? "(none)"}`);
-    console.log(`Expires: ${new Date(auth.expires).toISOString()} (in ${Math.floor(ms / 1000)}s)`);
-    console.log(`Scope: ${auth.scope ?? "(none)"}`);
-    console.log(`Storage: ${authPath()}`);
-  },
-  async logout() {
-    await clearAuth();
-    console.log("Logged out");
-  },
-};
-
 export const kimiProvider: Provider = {
   name: "kimi",
   supportedModels: new Set(["kimi-for-coding", "kimi-k2.6", "k2.6"]),
   handleMessages,
   handleCountTokens,
-  cli,
+  cli: kimiCli,
 };

@@ -1,6 +1,6 @@
 import type { AnthropicRequest } from "../../anthropic/schema.ts";
 import { wantsDownstreamStream } from "../../anthropic/stream.ts";
-import type { Provider, RequestContext, CliHandlers } from "../types.ts";
+import type { Provider, RequestContext } from "../types.ts";
 import {
   anthropicErrorBody,
   jsonError,
@@ -21,12 +21,9 @@ import { mapUsageToAnthropic } from "./translate/reducer.ts";
 import { CodexError, postCodex } from "./client.ts";
 import { countTokens, countTranslatedTokens } from "./count-tokens.ts";
 import { summarizeCodexRequestSize, type CodexRequestSizeSummary } from "./request-summary.ts";
-import { runBrowserLogin } from "./auth/pkce.ts";
-import { runDeviceLogin } from "./auth/device.ts";
-import { persistInitialTokens } from "./auth/manager.ts";
-import { loadAuth, authPath, clearAuth } from "./auth/token-store.ts";
 import { codexPreviousResponseId, logVerbose } from "../../config.ts";
 import { clearContinuation, continuationCandidate, recordContinuation } from "./continuation.ts";
+import { codexCli } from "./cli.ts";
 
 interface SessionCountSnapshot {
   reqId: string;
@@ -429,40 +426,10 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
   }
 }
 
-const cli: CliHandlers = {
-  async login() {
-    const tokens = await runBrowserLogin();
-    const saved = await persistInitialTokens(tokens);
-    console.log(`Auth saved in ${authPath()}`);
-    if (saved.accountId) console.log(`Account: ${saved.accountId}`);
-  },
-  async device() {
-    const tokens = await runDeviceLogin();
-    const saved = await persistInitialTokens(tokens);
-    console.log(`Auth saved in ${authPath()}`);
-    if (saved.accountId) console.log(`Account: ${saved.accountId}`);
-  },
-  async status() {
-    const auth = await loadAuth();
-    if (!auth) {
-      console.log("Not authenticated");
-      process.exit(1);
-    }
-    const ms = auth.expires - Date.now();
-    console.log(`Account: ${auth.accountId ?? "(none)"}`);
-    console.log(`Expires: ${new Date(auth.expires).toISOString()} (in ${Math.floor(ms / 1000)}s)`);
-    console.log(`Storage: ${authPath()}`);
-  },
-  async logout() {
-    await clearAuth();
-    console.log("Logged out");
-  },
-};
-
 export const codexProvider: Provider = {
   name: "codex",
   supportedModels: new Set([...ALLOWED_MODELS, ...FAST_MODEL_ALIASES]),
   handleMessages,
   handleCountTokens,
-  cli,
+  cli: codexCli,
 };

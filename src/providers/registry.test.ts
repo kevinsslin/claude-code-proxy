@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   allSupportedModels,
   ANTHROPIC_STYLE_ALIASES,
+  getProvider,
   groupSupportedModelsByProvider,
   normalizeIncomingModel,
   providerForModel,
@@ -122,5 +123,28 @@ describe("provider routing", () => {
     expect(cursorModels).toContain("cursor");
     expect(cursorModels).toContain("cursor-plan");
     expect(cursorModels).toContain("composer-2.5-fast");
+  });
+
+  it("keeps auth CLI commands available through the registry", () => {
+    const codex = getProvider("codex").cli;
+    expect(Object.keys(codex).sort()).toEqual(["device", "login", "logout", "status"]);
+    expect(typeof codex.login).toBe("function");
+    expect(typeof codex.device).toBe("function");
+    expect(typeof codex.status).toBe("function");
+    expect(typeof codex.logout).toBe("function");
+
+    const kimi = getProvider("kimi").cli;
+    expect(Object.keys(kimi).sort()).toEqual(["login", "logout", "status"]);
+    expect(typeof kimi.login).toBe("function");
+    expect(kimi.device).toBeUndefined();
+    expect(typeof kimi.status).toBe("function");
+    expect(typeof kimi.logout).toBe("function");
+
+    const cursor = getProvider("cursor").cli;
+    expect(Object.keys(cursor).sort()).toEqual(["login", "logout", "status"]);
+    expect(typeof cursor.login).toBe("function");
+    expect(cursor.device).toBeUndefined();
+    expect(typeof cursor.status).toBe("function");
+    expect(typeof cursor.logout).toBe("function");
   });
 });

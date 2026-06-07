@@ -2,7 +2,7 @@ import type { AnthropicRequest } from "../../anthropic/schema.ts";
 import { wantsDownstreamStream } from "../../anthropic/stream.ts";
 import { jsonError, jsonResponse, sseResponse } from "../../anthropic/response.ts";
 import { logVerbose } from "../../config.ts";
-import type { CliHandlers, Provider, RequestContext } from "../types.ts";
+import type { Provider, RequestContext } from "../types.ts";
 import {
   CursorError,
   runCursorAgent,
@@ -14,9 +14,7 @@ import {
   expiredAuthMessage,
   loadCursorAuth,
   missingAuthMessage,
-  clearCursorAuth,
 } from "./auth/token-store.ts";
-import { runCursorLogin } from "./auth/login.ts";
 import { renderCursorPrompt } from "./translate/request.ts";
 import { CURSOR_SUPPORTED_MODELS, resolveCursorModel } from "./translate/model.ts";
 import {
@@ -34,6 +32,7 @@ import {
 } from "./tool-bridge.ts";
 import type { CursorAuth } from "./auth/token-store.ts";
 import type { CursorProto } from "./proto-loader.ts";
+import { cursorCli } from "./cli.ts";
 
 const AUTH_EXPIRY_SKEW_MS = 60_000;
 
@@ -159,49 +158,13 @@ async function handleMessages(
   }
 }
 
-const cli: CliHandlers = {
-  async login() {
-    const auth = await runCursorLogin();
-    if (!auth) {
-      console.error("Cursor login did not complete.");
-      process.exit(1);
-    }
-    console.log();
-    console.log(`Logged in. Storage: ${auth.source}`);
-    if (auth.email) console.log(`Email: ${auth.email}`);
-    if (auth.userId) console.log(`User: ${auth.userId}`);
-    if (auth.expires) console.log(`Expires: ${new Date(auth.expires).toISOString()}`);
-  },
-  async status() {
-    const auth = await loadCursorAuth();
-    if (!auth) {
-      console.log("Not authenticated");
-      console.log(missingAuthMessage());
-      process.exit(1);
-    }
-    console.log(`Storage: ${auth.source}`);
-    if (auth.email) console.log(`Email: ${auth.email}`);
-    if (auth.userId) console.log(`User: ${auth.userId}`);
-    if (auth.expires) {
-      const ms = auth.expires - Date.now();
-      console.log(`Expires: ${new Date(auth.expires).toISOString()} (in ${Math.floor(ms / 1000)}s)`);
-    } else {
-      console.log("Expires: unknown");
-    }
-  },
-  async logout() {
-    await clearCursorAuth();
-    console.log(`Cleared Cursor auth from ${cursorAuthLocation()}`);
-  },
-};
-
 export function createCursorProvider(deps: CursorProviderDeps = defaultDeps): Provider {
   return {
     name: "cursor",
     supportedModels: CURSOR_SUPPORTED_MODELS,
     handleMessages: (body, ctx) => handleMessages(body, ctx, deps),
     handleCountTokens,
-    cli,
+    cli: cursorCli,
   };
 }
 
