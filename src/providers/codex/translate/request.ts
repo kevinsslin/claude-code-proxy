@@ -255,6 +255,11 @@ function buildInput(messages: AnthropicMessage[]): ResponsesInputItem[] {
         }
       }
       if (parts.length) out.push({ type: "message", role: "user", content: parts });
+    } else if (msg.role === "system") {
+      const parts = blocks
+        .filter((block): block is AnthropicTextBlock => block.type === "text")
+        .map((block) => ({ type: "input_text" as const, text: block.text }));
+      if (parts.length) out.push({ type: "message", role: "developer", content: parts });
     } else {
       // assistant: preserve interleaved order of text vs tool_use
       const textParts: ResponsesContentPart[] = [];

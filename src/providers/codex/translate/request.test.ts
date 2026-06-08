@@ -76,6 +76,29 @@ describe("translateRequest", () => {
     );
   });
 
+  it("translates mid-conversation system messages as developer input", () => {
+    const translated = translateRequest({
+      ...baseRequest,
+      messages: [
+        { role: "user", content: "hello" },
+        { role: "system", content: "remember this runtime constraint" },
+      ],
+    });
+
+    expect(translated.input).toEqual([
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "hello" }],
+      },
+      {
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: "remember this runtime constraint" }],
+      },
+    ]);
+  });
+
   it("translates unsupported tool result content blocks without throwing", () => {
     const translated = translateRequest({
       ...baseRequest,
