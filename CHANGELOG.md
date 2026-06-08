@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.0.18 (2026-06-09)
+
+- Cursor sessions now stop heartbeat traffic after streams close, reducing stray connection errors.
+- Codex now preserves runtime system messages so session-provided guidance is retained across requests.
+
 ## v0.0.17 (2026-06-08)
 
 - Added Cursor Agent as a provider, including login, model selection, ask mode, plan mode, and session continuation.
