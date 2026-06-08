@@ -31,6 +31,9 @@ import {
   canBridgeCursorReadTool,
   canBridgeCursorWriteTool,
   createCursorShellToolBridge,
+  denyCursorBashTool,
+  denyCursorReadTool,
+  denyCursorWriteTool,
   resumeCursorShellToolBridge,
 } from "./tool-bridge.ts";
 import type { CursorAuth } from "./auth/token-store.ts";
@@ -106,6 +109,7 @@ async function handleMessages(
   const bridgeRead = canBridgeCursorReadTool(body);
   const bridgeBash = canBridgeCursorBashTool(body);
   const bridgeWrite = canBridgeCursorWriteTool(body);
+  const denyUnadvertisedNativeTools = Boolean(wantStream && ctx.sessionId);
 
   let upstream: ReadableStream<Uint8Array>;
   try {
@@ -116,9 +120,21 @@ async function handleMessages(
       model: selection.requestedModel,
       auth,
       ctx,
-      readHandler: bridgeRead ? nativeToolBridge?.readHandler : undefined,
-      shellStreamHandler: bridgeBash ? nativeToolBridge?.shellStreamHandler : undefined,
-      writeHandler: bridgeWrite ? nativeToolBridge?.writeHandler : undefined,
+      readHandler: bridgeRead
+        ? nativeToolBridge?.readHandler
+        : denyUnadvertisedNativeTools
+        ? denyCursorReadTool
+        : undefined,
+      shellStreamHandler: bridgeBash
+        ? nativeToolBridge?.shellStreamHandler
+        : denyUnadvertisedNativeTools
+        ? denyCursorBashTool
+        : undefined,
+      writeHandler: bridgeWrite
+        ? nativeToolBridge?.writeHandler
+        : denyUnadvertisedNativeTools
+        ? denyCursorWriteTool
+        : undefined,
     });
   } catch (err) {
     if (err instanceof CursorError) {

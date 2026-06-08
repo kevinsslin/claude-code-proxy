@@ -4,7 +4,7 @@ import type { RequestContext } from "../types.ts";
 import { encodeConnectFrame, runCursorAgent } from "./client.ts";
 import type { CursorProto, ProtoClass, ProtoMessage } from "./proto-loader.ts";
 import { parseSseStream } from "../../sse.ts";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -263,6 +263,89 @@ describe("Cursor provider messages", () => {
     );
     expect(resumeEvents.find((event) => event.event === "message_delta")?.data.delta.stop_reason).toBe("end_turn");
     expect(resumeEvents.at(-1)?.event).toBe("message_stop");
+  });
+
+  it("denies Cursor shellStreamArgs instead of executing internally when Claude did not advertise Bash", async () => {
+    let serverController!: ReadableStreamDefaultController<Uint8Array>;
+    const sentFrames: Array<Record<string, any>> = [];
+    let finalResponseSent = false;
+    const dir = await mkdtemp(join(tmpdir(), "cursor-denied-shell-"));
+    const file = join(dir, "hidden-edit.txt");
+    const serverReadable = new ReadableStream<Uint8Array>({
+      start(controller) {
+        serverController = controller;
+        queueMicrotask(() => {
+          controller.enqueue(frame({
+            message: {
+              case: "execServerMessage",
+              value: {
+                id: 13,
+                execId: "exec-shell-denied",
+                message: {
+                  case: "shellStreamArgs",
+                  value: {
+                    command: `printf hidden > ${JSON.stringify(file)}`,
+                    workingDirectory: dir,
+                    timeout: 5000,
+                  },
+                },
+              },
+            },
+          }));
+        });
+      },
+    });
+    const provider = createCursorProvider({
+      loadAuth: async () => ({ accessToken: "token", source: "test" }),
+      runAgent: async (opts) =>
+        runCursorAgent({
+          ...opts,
+          proto: fakeProto,
+          openRunStream: async () => ({
+            readable: serverReadable,
+            status: Promise.resolve({ status: 200 }),
+            async write(frameBytes) {
+              const message = decodeFrameJson(frameBytes) as Record<string, any>;
+              sentFrames.push(message);
+              if (message.execClientMessage?.shellStream?.exit && !finalResponseSent) {
+                finalResponseSent = true;
+                serverController.enqueue(frame({
+                  interactionUpdate: { textDelta: { text: "shell was denied" } },
+                }));
+                serverController.enqueue(frame({
+                  interactionUpdate: { turnEnded: { inputTokens: "4", outputTokens: "3" } },
+                }));
+                serverController.close();
+              }
+            },
+            close() {},
+          }),
+        }),
+      proto: fakeProto,
+    });
+
+    const response = await provider.handleMessages(
+      {
+        model: "cursor",
+        stream: true,
+        tools: [{ name: "Read", input_schema: { type: "object" } }],
+        messages: [{ role: "user", content: "try hidden shell edit" }],
+      },
+      fakeCtx(),
+    );
+    const events = await collectSse(response);
+
+    expect(events.some((event) =>
+      event.event === "content_block_start" && event.data.content_block?.name === "Bash"
+    )).toBe(false);
+    expect(sentFrames.some((message) =>
+      String(message.execClientMessage?.shellStream?.stderr?.data ?? "").includes("did not advertise the Bash tool")
+    )).toBe(true);
+    expect(sentFrames.find((message) => message.execClientMessage?.shellStream?.exit)
+      ?.execClientMessage.shellStream.exit.code).toBe(1);
+    expect(await exists(file)).toBe(false);
+    expect(events.find((event) => event.event === "content_block_delta")?.data.delta.text).toBe("shell was denied");
+    expect(events.find((event) => event.event === "message_delta")?.data.delta.stop_reason).toBe("end_turn");
   });
 
   it("bridges Cursor writeArgs through Claude Write tool_use and resumes from tool_result", async () => {
@@ -611,6 +694,15 @@ async function collectSse(response: Response): Promise<Array<{ event: string; da
     events.push({ event: event.event ?? "message", data: JSON.parse(event.data) });
   }
   return events;
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function jwt(payload: Record<string, unknown>): string {

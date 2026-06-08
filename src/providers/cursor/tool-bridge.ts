@@ -91,6 +91,41 @@ export function canBridgeCursorWriteTool(body: AnthropicRequest): boolean {
   return Boolean(body.tools?.some((tool) => tool.name === "Write"));
 }
 
+export async function denyCursorReadTool(exec: CursorReadExec, append: CursorAppendMessage): Promise<void> {
+  await appendCursorReadResult(
+    exec,
+    {
+      success: false,
+      error: "Cursor requested Read, but Claude did not advertise the Read tool",
+    },
+    append,
+  );
+}
+
+export async function denyCursorBashTool(exec: CursorShellStreamExec, append: CursorAppendMessage): Promise<void> {
+  await appendCursorShellStreamResult(
+    exec,
+    {
+      stderr: "Cursor requested Bash, but Claude did not advertise the Bash tool",
+      exitCode: 1,
+      cwd: cursorShellStreamArgs(exec).workingDirectory,
+      localExecutionTimeMs: 0,
+    },
+    append,
+  );
+}
+
+export async function denyCursorWriteTool(exec: CursorWriteExec, append: CursorAppendMessage): Promise<void> {
+  await appendCursorWriteResult(
+    exec,
+    {
+      success: false,
+      error: "Cursor requested Write, but Claude did not advertise the Write tool",
+    },
+    append,
+  );
+}
+
 export function createCursorShellToolBridge(opts: {
   sessionId: string;
   messageId: string;
