@@ -18,7 +18,6 @@ import {
   type CursorReadExec,
   type CursorShellStreamExec,
   type CursorStreamEvent,
-  type CursorUsage,
   type CursorWriteExec,
 } from "./client.ts";
 import type { CursorProto } from "./proto-loader.ts";
@@ -156,31 +155,46 @@ export function createCursorShellToolBridge(opts: {
     for (const waiter of state.waiters.splice(0)) waiter(tool);
   };
 
+  const createPendingTool = <T extends PendingNativeTool>(
+    append: CursorAppendMessage,
+    build: (base: {
+      toolUseId: string;
+      startedAt: number;
+      append: CursorAppendMessage;
+      resolve(result: CursorNativeToolResult): void;
+      result: Promise<CursorNativeToolResult>;
+    }) => T,
+  ): T => {
+    const toolUseId = `call_cursor_${crypto.randomUUID().replace(/-/g, "")}`;
+    let resolve!: (result: CursorNativeToolResult) => void;
+    const result = new Promise<CursorNativeToolResult>((r) => {
+      resolve = r;
+    });
+    return build({
+      toolUseId,
+      startedAt: Date.now(),
+      append,
+      resolve,
+      result,
+    });
+  };
+
   return {
     async readHandler(exec, append) {
       const { path } = cursorReadArgs(exec);
-      const toolUseId = `call_cursor_${crypto.randomUUID().replace(/-/g, "")}`;
-      let resolve!: (result: CursorNativeToolResult) => void;
-      const result = new Promise<CursorNativeToolResult>((r) => {
-        resolve = r;
-      });
-      const tool: PendingReadTool = {
+      const tool = createPendingTool<PendingReadTool>(append, (base) => ({
         kind: "Read",
-        toolUseId,
         exec,
         path,
-        startedAt: Date.now(),
-        append,
-        resolve,
-        result,
-      };
+        ...base,
+      }));
       opts.traffic?.writeJsonEvent("038-cursor-tool-bridge-pause", {
         kind: tool.kind,
-        toolUseId,
+        toolUseId: tool.toolUseId,
         path,
       });
       notifyTool(tool);
-      const readResult = await result;
+      const readResult = await tool.result;
       await appendCursorReadResult(
         exec,
         buildCursorReadResultFromNativeToolResult(readResult),
@@ -188,39 +202,30 @@ export function createCursorShellToolBridge(opts: {
       );
       opts.traffic?.writeJsonEvent("038-cursor-tool-bridge-resume", {
         kind: tool.kind,
-        toolUseId,
+        toolUseId: tool.toolUseId,
         isError: readResult.isError,
         contentChars: readResult.content.length,
       });
     },
     async shellStreamHandler(exec, append) {
       const { command, workingDirectory, timeoutMs } = cursorShellStreamArgs(exec);
-      const toolUseId = `call_cursor_${crypto.randomUUID().replace(/-/g, "")}`;
-      let resolve!: (result: CursorNativeToolResult) => void;
-      const result = new Promise<CursorNativeToolResult>((r) => {
-        resolve = r;
-      });
-      const tool: PendingShellTool = {
+      const tool = createPendingTool<PendingShellTool>(append, (base) => ({
         kind: "Bash",
-        toolUseId,
         exec,
         command,
         workingDirectory,
         timeoutMs,
-        startedAt: Date.now(),
-        append,
-        resolve,
-        result,
-      };
+        ...base,
+      }));
       opts.traffic?.writeJsonEvent("038-cursor-tool-bridge-pause", {
         kind: tool.kind,
-        toolUseId,
+        toolUseId: tool.toolUseId,
         command,
         workingDirectory,
         timeoutMs,
       });
       notifyTool(tool);
-      const shellResult = await result;
+      const shellResult = await tool.result;
       await appendCursorShellStreamResult(
         exec,
         buildCursorShellStreamResultFromNativeToolResult(
@@ -232,41 +237,32 @@ export function createCursorShellToolBridge(opts: {
       );
       opts.traffic?.writeJsonEvent("038-cursor-tool-bridge-resume", {
         kind: tool.kind,
-        toolUseId,
+        toolUseId: tool.toolUseId,
         isError: shellResult.isError,
         contentChars: shellResult.content.length,
       });
     },
     async writeHandler(exec, append) {
       const { path, content } = cursorWriteArgs(exec);
-      const toolUseId = `call_cursor_${crypto.randomUUID().replace(/-/g, "")}`;
-      let resolve!: (result: CursorNativeToolResult) => void;
-      const result = new Promise<CursorNativeToolResult>((r) => {
-        resolve = r;
-      });
-      const tool: PendingWriteTool = {
+      const tool = createPendingTool<PendingWriteTool>(append, (base) => ({
         kind: "Write",
-        toolUseId,
         exec,
         path,
         content,
-        startedAt: Date.now(),
-        append,
-        resolve,
-        result,
-      };
+        ...base,
+      }));
       opts.traffic?.writeJsonEvent("038-cursor-tool-bridge-pause", {
         kind: tool.kind,
-        toolUseId,
+        toolUseId: tool.toolUseId,
         path,
         contentChars: content.length,
       });
       notifyTool(tool);
-      const writeResult = await result;
+      const writeResult = await tool.result;
       await appendCursorWriteResult(exec, buildCursorWriteResultFromNativeToolResult(writeResult), append);
       opts.traffic?.writeJsonEvent("038-cursor-tool-bridge-resume", {
         kind: tool.kind,
-        toolUseId,
+        toolUseId: tool.toolUseId,
         isError: writeResult.isError,
         contentChars: writeResult.content.length,
       });
@@ -321,7 +317,6 @@ function streamBridgeUntilToolOrEnd(
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       let closed = false;
-      let finalUsage: CursorUsage | undefined;
 
       const emit = (event: string, data: unknown) => {
         if (closed || signal?.aborted || controller.desiredSize === null) return false;
@@ -338,7 +333,7 @@ function streamBridgeUntilToolOrEnd(
       });
 
       const emitToolUseAndPause = (tool: PendingNativeTool) => {
-        framing.emitToolPauseMessage(finalUsage, (index) => {
+        framing.emitToolPauseMessage((index) => {
           const input = toolUseInput(tool);
           emit("content_block_start", {
             type: "content_block_start",
@@ -360,7 +355,7 @@ function streamBridgeUntilToolOrEnd(
       };
 
       const emitMessageEnd = () => {
-        framing.emitFinalMessage("end_turn", finalUsage);
+        framing.emitFinalMessage("end_turn");
       };
 
       const emitStreamError = (err: unknown) => {
@@ -396,7 +391,7 @@ function streamBridgeUntilToolOrEnd(
               framing.emitTextDelta(event.text);
               break;
             case "usage":
-              finalUsage = event.usage;
+              framing.recordUsage(event.usage);
               break;
             case "end":
               break;

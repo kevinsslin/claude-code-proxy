@@ -12,9 +12,10 @@ interface CursorSseFramingOptions {
 export interface CursorSseFramer {
   emitThinkingDelta(text: string): void;
   emitTextDelta(text: string): void;
-  emitFinalMessage(stopReason: CursorSseStopReason, usage?: CursorUsage): void;
+  recordUsage(usage: CursorUsage): void;
+  emitFinalMessage(stopReason: CursorSseStopReason): void;
   emitError(error: unknown): void;
-  emitToolPauseMessage(usage: CursorUsage | undefined, emitToolUse: (index: number) => void): void;
+  emitToolPauseMessage(emitToolUse: (index: number) => void): void;
   closeOpenBlocks(): void;
   ensureStart(): void;
   nextContentBlockIndex(): number;
@@ -27,6 +28,7 @@ export function createCursorSseFramer(opts: CursorSseFramingOptions): CursorSseF
   let nextIndex = 0;
   let thinkingIndex = -1;
   let textIndex = -1;
+  let finalUsage: CursorUsage | undefined;
 
   const emit = (event: string, data: unknown) => {
     opts.emit(event, data);
@@ -93,13 +95,13 @@ export function createCursorSseFramer(opts: CursorSseFramingOptions): CursorSseF
     }
   };
 
-  const emitFinalMessage = (stopReason: CursorSseStopReason, usage?: CursorUsage) => {
+  const emitFinalMessage = (stopReason: CursorSseStopReason) => {
     ensureStart();
     closeOpenBlocks();
     emit("message_delta", {
       type: "message_delta",
       delta: { stop_reason: stopReason, stop_sequence: null },
-      usage: opts.mapUsage(usage),
+      usage: opts.mapUsage(finalUsage),
     });
     emit("message_stop", { type: "message_stop" });
   };
@@ -125,6 +127,9 @@ export function createCursorSseFramer(opts: CursorSseFramingOptions): CursorSseF
         delta: { type: "text_delta", text },
       });
     },
+    recordUsage(usage) {
+      finalUsage = usage;
+    },
     emitFinalMessage,
     emitError(error) {
       ensureStart();
@@ -134,12 +139,12 @@ export function createCursorSseFramer(opts: CursorSseFramingOptions): CursorSseF
         error: { type: "api_error", message: String(error) },
       });
     },
-    emitToolPauseMessage(usage, emitToolUse) {
+    emitToolPauseMessage(emitToolUse) {
       closeOpenBlocks();
       ensureStart();
       const index = nextContentBlockIndex();
       emitToolUse(index);
-      emitFinalMessage("tool_use", usage);
+      emitFinalMessage("tool_use");
     },
     closeOpenBlocks,
     ensureStart,

@@ -130,7 +130,6 @@ export function translateCursorStream(
       });
 
       try {
-        let finalUsage: CursorUsage | undefined;
         for await (const event of decodeCursorStream(upstream, opts.proto, { traffic: opts.traffic, log: opts.log })) {
           opts.traffic?.writeJsonEvent("040-cursor-event", event);
           if (opts.signal?.aborted) return;
@@ -145,13 +144,13 @@ export function translateCursorStream(
               framing.emitTextDelta(event.text);
               break;
             case "usage":
-              finalUsage = event.usage;
+              framing.recordUsage(event.usage);
               break;
             case "end":
               break;
           }
         }
-        framing.emitFinalMessage("end_turn", finalUsage);
+        framing.emitFinalMessage("end_turn");
       } catch (err) {
         opts.log.warn("cursor stream error", { err: String(err) });
         framing.emitError(err);
