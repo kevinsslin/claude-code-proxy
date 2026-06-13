@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { gzipSync } from "node:zlib";
 import { decodeCursorStream, encodeConnectFrame } from "../client.ts";
+import type { CursorStreamEvent } from "../client.ts";
 import {
   collectCursorSse,
   fakeProto,
@@ -14,6 +15,41 @@ import {
   translateCursorStream,
 } from "./response.ts";
 import { createLogger } from "../../../log.ts";
+
+/** Wraps decodeCursorStream with cancellation tracking. */
+async function collectDecodedCursorEvents(
+  ...chunks: Uint8Array[]
+): Promise<{ events: CursorStreamEvent[]; cancelled: boolean }> {
+  let cancelled = false;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk);
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+
+  const events: CursorStreamEvent[] = [];
+  for await (const event of decodeCursorStream(stream, fakeProto)) events.push(event);
+  return { events, cancelled };
+}
+
+async function translateCursorSse(
+  frames: Uint8Array[],
+  messageId: string,
+): Promise<Array<{ event: string; data: any }>> {
+  const downstream = translateCursorStream(
+    streamFromChunks(frames),
+    {
+      messageId,
+      model: "cursor-plan",
+      log: createLogger("cursor.response.test"),
+      proto: fakeProto,
+    },
+  );
+  return collectCursorSse(downstream);
+}
 
 describe("Cursor response translation", () => {
   it("maps usage tokens including cache reads and writes", () => {
@@ -50,19 +86,10 @@ describe("Cursor response translation", () => {
   });
 
   it("terminates on Connect end even if the HTTP/2 stream stays open", async () => {
-    let cancelled = false;
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(frame({ interactionUpdate: { textDelta: { text: "hi" } } }));
-        controller.enqueue(encodeConnectFrame(jsonBytes({}), 2));
-      },
-      cancel() {
-        cancelled = true;
-      },
-    });
-
-    const events = [];
-    for await (const event of decodeCursorStream(stream, fakeProto)) events.push(event);
+    const { events, cancelled } = await collectDecodedCursorEvents(
+      frame({ interactionUpdate: { textDelta: { text: "hi" } } }),
+      encodeConnectFrame(jsonBytes({}), 2),
+    );
 
     expect(events).toEqual([{ type: "text_delta", text: "hi" }, { type: "end" }]);
     expect(cancelled).toBe(true);
@@ -109,19 +136,10 @@ describe("Cursor response translation", () => {
   });
 
   it("terminates on turnEnded even if the HTTP/2 stream stays open", async () => {
-    let cancelled = false;
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(frame({ interactionUpdate: { textDelta: { text: "hi" } } }));
-        controller.enqueue(frame({ interactionUpdate: { turnEnded: { inputTokens: "4", outputTokens: "1" } } }));
-      },
-      cancel() {
-        cancelled = true;
-      },
-    });
-
-    const events = [];
-    for await (const event of decodeCursorStream(stream, fakeProto)) events.push(event);
+    const { events, cancelled } = await collectDecodedCursorEvents(
+      frame({ interactionUpdate: { textDelta: { text: "hi" } } }),
+      frame({ interactionUpdate: { turnEnded: { inputTokens: "4", outputTokens: "1" } } }),
+    );
 
     expect(events).toEqual([
       { type: "text_delta", text: "hi" },
@@ -189,22 +207,15 @@ describe("Cursor response translation", () => {
   });
 
   it("emits valid Anthropic SSE for thinking and text deltas", async () => {
-    const downstream = translateCursorStream(
-      streamFromChunks([
+    const events = await translateCursorSse(
+      [
         frame({ interactionUpdate: { thinkingDelta: { text: "plan" } } }),
         frame({ interactionUpdate: { textDelta: { text: "done" } } }),
         frame({ interactionUpdate: { turnEnded: { inputTokens: "8", outputTokens: "3" } } }),
         encodeConnectFrame(jsonBytes({}), 2),
-      ]),
-      {
-        messageId: "msg_2",
-        model: "cursor-plan",
-        log: createLogger("cursor.response.test"),
-        proto: fakeProto,
-      },
+      ],
+      "msg_2",
     );
-
-    const events = await collectCursorSse(downstream);
 
     expect(events.map((event) => event.event)).toEqual([
       "message_start",
@@ -225,8 +236,8 @@ describe("Cursor response translation", () => {
   });
 
   it("emits an Anthropic SSE error for Cursor Connect end errors", async () => {
-    const downstream = translateCursorStream(
-      streamFromChunks([
+    const events = await translateCursorSse(
+      [
         encodeConnectFrame(
           jsonBytes({
             error: {
@@ -247,16 +258,9 @@ describe("Cursor response translation", () => {
           }),
           2,
         ),
-      ]),
-      {
-        messageId: "msg_error",
-        model: "cursor-plan",
-        log: createLogger("cursor.response.test"),
-        proto: fakeProto,
-      },
+      ],
+      "msg_error",
     );
-
-    const events = await collectCursorSse(downstream);
 
     expect(events.map((event) => event.event)).toEqual(["message_start", "ping", "error"]);
     expect(events[2]?.data.error.message).toContain("resource_exhausted");
