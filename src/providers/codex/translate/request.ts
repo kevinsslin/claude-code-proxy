@@ -1,13 +1,17 @@
 import type {
   AnthropicContentBlock,
-  AnthropicImageBlock,
   AnthropicMessage,
   AnthropicRequest,
-  AnthropicTextBlock,
   AnthropicTool,
-  AnthropicToolResultContentBlock,
 } from "../../../anthropic/schema.ts";
 import { codexEffort, codexServiceTier } from "../../../config.ts";
+import {
+  assertValidEffort,
+  flattenSystemText,
+  imageBlockToUrl,
+  normalizeContent,
+  toolResultToString,
+} from "../../translate/anthropic-content.ts";
 
 export type Effort = "none" | "low" | "medium" | "high" | "xhigh";
 export type ServiceTier = "priority" | "flex";
@@ -101,17 +105,7 @@ export interface TranslateOptions {
 
 const VALID_EFFORTS = new Set<Effort>(["none", "low", "medium", "high", "xhigh"]);
 
-const ANTHROPIC_EFFORTS = new Set(["low", "medium", "high", "max"]);
-
 const VALID_SERVICE_TIERS = new Set(["fast", "priority", "flex"]);
-
-function assertValidEffort(effort: unknown): void {
-  if (effort !== undefined && !ANTHROPIC_EFFORTS.has(effort as string)) {
-    throw new Error(
-      `Invalid output_config.effort: ${JSON.stringify(effort)}. Must be one of: ${Array.from(ANTHROPIC_EFFORTS).join(", ")}`,
-    );
-  }
-}
 
 function toCodexEffort(
   effort: NonNullable<AnthropicRequest["output_config"]>["effort"],
@@ -218,17 +212,9 @@ function mapToolChoice(choice: AnthropicRequest["tool_choice"]): ResponsesReques
   }
 }
 
-export function buildInstructions(system: AnthropicRequest["system"]): string | undefined {
-  if (!system) return undefined;
-  const blocks: AnthropicTextBlock[] =
-    typeof system === "string" ? [{ type: "text", text: system }] : system;
-  const texts = blocks
-    .filter((b) => b && b.type === "text" && typeof b.text === "string")
-    .map((b) => b.text)
-    .filter((t) => !t.startsWith("x-anthropic-billing-header:"));
-  if (!texts.length) return undefined;
-  return texts.join("\n\n");
-}
+export const buildInstructions = flattenSystemText;
+
+export { normalizeContent, toolResultToString };
 
 function buildInput(messages: AnthropicMessage[]): ResponsesInputItem[] {
   const out: ResponsesInputItem[] = [];
@@ -241,7 +227,7 @@ function buildInput(messages: AnthropicMessage[]): ResponsesInputItem[] {
         if (block.type === "text") {
           parts.push({ type: "input_text", text: block.text });
         } else if (block.type === "image") {
-          parts.push({ type: "input_image", image_url: imageToUrl(block) });
+          parts.push({ type: "input_image", image_url: imageBlockToUrl(block) });
         } else if (block.type === "tool_result") {
           if (parts.length) {
             out.push({ type: "message", role: "user", content: parts.splice(0) });
@@ -257,7 +243,7 @@ function buildInput(messages: AnthropicMessage[]): ResponsesInputItem[] {
       if (parts.length) out.push({ type: "message", role: "user", content: parts });
     } else if (msg.role === "system") {
       const parts = blocks
-        .filter((block): block is AnthropicTextBlock => block.type === "text")
+        .filter((block): block is AnthropicContentBlock & { type: "text" } => block.type === "text")
         .map((block) => ({ type: "input_text" as const, text: block.text }));
       if (parts.length) out.push({ type: "message", role: "developer", content: parts });
     } else {
@@ -287,57 +273,8 @@ function buildInput(messages: AnthropicMessage[]): ResponsesInputItem[] {
   return out;
 }
 
-export function normalizeContent(content: AnthropicMessage["content"]): AnthropicContentBlock[] {
-  if (typeof content === "string") return [{ type: "text", text: content }];
-  return content;
-}
-
-function imageToUrl(block: Extract<AnthropicContentBlock, { type: "image" }>): string {
-  if (block.source.type === "url") return block.source.url;
-  return `data:${block.source.media_type};base64,${block.source.data}`;
-}
-
-function unsupportedToolResultBlockToString(block: AnthropicToolResultContentBlock): string {
-  const type = typeof block.type === "string" ? block.type : "unknown";
-  return `[unsupported content block omitted: ${type}]`;
-}
-
-function isToolResultTextBlock(
-  block: AnthropicToolResultContentBlock,
-): block is AnthropicTextBlock {
-  return block.type === "text" && typeof block.text === "string";
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object";
-}
-
-function isToolResultImageBlock(
-  block: AnthropicToolResultContentBlock,
-): block is AnthropicImageBlock {
-  if (block.type !== "image") return false;
-  const source = block.source;
-  if (!isRecord(source)) return false;
-  if (source.type === "url") return typeof source.url === "string";
-  return (
-    source.type === "base64" &&
-    typeof source.media_type === "string" &&
-    typeof source.data === "string"
-  );
-}
-
-export function toolResultToString(content: string | AnthropicToolResultContentBlock[]): string {
-  if (typeof content === "string") return content;
-  return content
-    .map((b) => {
-      if (isToolResultTextBlock(b)) return b.text;
-      if (isToolResultImageBlock(b)) {
-        const mt = b.source.type === "base64" ? b.source.media_type : "url";
-        return `[image omitted: ${mt}]`;
-      }
-      return unsupportedToolResultBlockToString(b);
-    })
-    .join("\n");
 }
 
 function toResponsesTool(tool: AnthropicTool): ResponsesTool {

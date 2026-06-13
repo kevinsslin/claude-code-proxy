@@ -1,15 +1,19 @@
 import { encode } from "gpt-tokenizer/model/gpt-4o";
 import type { AnthropicRequest } from "../../anthropic/schema.ts";
 import type { KimiChatRequest } from "./translate/request.ts";
-import { buildSystemMessage, normalizeContent, toolResultToString } from "./translate/request.ts";
+import {
+  flattenSystemText,
+  normalizeContent,
+  toolResultToString,
+} from "../translate/anthropic-content.ts";
 
 const IMAGE_TOKEN_ESTIMATE = 2000;
 
-// Approximate — Kimi's tokenizer isn't gpt-tokenizer, but Claude Code's
+// Approximate: Kimi's tokenizer isn't gpt-tokenizer, but Claude Code's
 // compaction logic only needs a monotonic estimate, not an exact count.
 export function countTokens(req: AnthropicRequest): number {
   let total = 0;
-  const system = buildSystemMessage(req.system);
+  const system = flattenSystemText(req.system);
   if (system) total += encode(system).length;
 
   for (const msg of req.messages) {

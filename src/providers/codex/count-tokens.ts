@@ -1,13 +1,17 @@
 import { encode } from "gpt-tokenizer/model/gpt-4o";
 import type { AnthropicRequest } from "../../anthropic/schema.ts";
 import type { ResponsesRequest } from "./translate/request.ts";
-import { buildInstructions, normalizeContent, toolResultToString } from "./translate/request.ts";
+import {
+  flattenSystemText,
+  normalizeContent,
+  toolResultToString,
+} from "../translate/anthropic-content.ts";
 
 const IMAGE_TOKEN_ESTIMATE = 2000;
 
 export function countTokens(req: AnthropicRequest): number {
   let total = 0;
-  const instructions = buildInstructions(req.system);
+  const instructions = flattenSystemText(req.system);
   if (instructions) total += encode(instructions).length;
 
   for (const msg of req.messages) {

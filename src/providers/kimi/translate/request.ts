@@ -1,12 +1,19 @@
 import type {
   AnthropicContentBlock,
-  AnthropicImageBlock,
-  AnthropicMessage,
   AnthropicRequest,
-  AnthropicTextBlock,
   AnthropicTool,
   AnthropicToolResultContentBlock,
 } from "../../../anthropic/schema.ts";
+import {
+  assertValidEffort,
+  flattenSystemText,
+  imageBlockToUrl,
+  isToolResultImageBlock,
+  isToolResultTextBlock,
+  normalizeContent,
+  toolResultToString,
+  unsupportedToolResultBlockToString,
+} from "../../translate/anthropic-content.ts";
 
 // OpenAI-compatible chat-completions request shape used by Kimi.
 // Only the fields kimi-cli is known to send are included; unknown
@@ -71,8 +78,8 @@ const DEFAULT_MAX_TOKENS = 32000;
 // Kimi's `kimi-for-coding` is a reasoning model: it always produces
 // reasoning_content and its server always enforces that prior assistant
 // tool_call messages carry reasoning_content back. The `thinking` /
-// `reasoning_effort` flags on the request don't gate that contract —
-// they're a model-level property. So we always enable thinking on the
+// `reasoning_effort` flags on the request don't gate that contract.
+// They're a model-level property. So we always enable thinking on the
 // outbound Kimi request and always forward/replay reasoning end-to-end.
 export function translateRequest(
   req: AnthropicRequest,
@@ -103,16 +110,6 @@ function clampMaxTokens(requested: number | undefined): number {
   return Math.min(requested, DEFAULT_MAX_TOKENS);
 }
 
-const ANTHROPIC_EFFORTS = new Set(["low", "medium", "high", "max"]);
-
-function assertValidEffort(effort: unknown): void {
-  if (effort !== undefined && !ANTHROPIC_EFFORTS.has(effort as string)) {
-    throw new Error(
-      `Invalid output_config.effort: ${JSON.stringify(effort)}. Must be one of: ${Array.from(ANTHROPIC_EFFORTS).join(", ")}`,
-    );
-  }
-}
-
 // Kimi's reasoning_effort is capped at "high"; collapse the proxy's "max"
 // to "high" since Kimi has no stronger tier, and default to "medium" when no
 // effort is requested.
@@ -137,17 +134,9 @@ function mapToolChoice(choice: AnthropicRequest["tool_choice"]): KimiToolChoice 
   }
 }
 
-export function buildSystemMessage(system: AnthropicRequest["system"]): string | undefined {
-  if (!system) return undefined;
-  const blocks: AnthropicTextBlock[] =
-    typeof system === "string" ? [{ type: "text", text: system }] : system;
-  const texts = blocks
-    .filter((b) => b && b.type === "text" && typeof b.text === "string")
-    .map((b) => b.text)
-    .filter((t) => !t.startsWith("x-anthropic-billing-header:"));
-  if (!texts.length) return undefined;
-  return texts.join("\n\n");
-}
+export const buildSystemMessage = flattenSystemText;
+
+export { normalizeContent, toolResultToString };
 
 function buildMessages(req: AnthropicRequest): KimiMessage[] {
   const out: KimiMessage[] = [];
@@ -173,7 +162,7 @@ function pushUserMessages(out: KimiMessage[], blocks: AnthropicContentBlock[]): 
   let buffer: KimiUserContentPart[] = [];
   const flushBuffer = () => {
     if (!buffer.length) return;
-    // Collapse to a string when every part is text — matches what kimi-cli
+    // Collapse to a string when every part is text. This matches what kimi-cli
     // sends and keeps the wire payload compact.
     const allText = buffer.every((p) => p.type === "text");
     if (allText) {
@@ -191,7 +180,7 @@ function pushUserMessages(out: KimiMessage[], blocks: AnthropicContentBlock[]): 
     if (block.type === "text") {
       buffer.push({ type: "text", text: block.text });
     } else if (block.type === "image") {
-      buffer.push({ type: "image_url", image_url: { url: imageToUrl(block) } });
+      buffer.push({ type: "image_url", image_url: { url: imageBlockToUrl(block) } });
     } else if (block.type === "tool_result") {
       flushBuffer();
       out.push({
@@ -223,7 +212,7 @@ function pushAssistantMessage(out: KimiMessage[], blocks: AnthropicContentBlock[
         },
       });
     }
-    // image blocks from the assistant are dropped — Kimi's assistant
+    // image blocks from the assistant are dropped because Kimi's assistant
     // schema does not express them.
   }
 
@@ -232,51 +221,13 @@ function pushAssistantMessage(out: KimiMessage[], blocks: AnthropicContentBlock[
   const msg: KimiAssistantMessage = { role: "assistant" };
   msg.content = textParts.length ? textParts.join("") : "";
   // Kimi accepts one reasoning_content string per assistant turn. If a turn
-  // has multiple interleaved thinking blocks we concatenate in order —
-  // exact block/tool_use pairing can't be preserved over the wire.
+  // has multiple interleaved thinking blocks we concatenate in order.
+  // Exact block/tool_use pairing can't be preserved over the wire.
   if (thinkingParts.length) msg.reasoning_content = thinkingParts.join("\n\n");
   if (toolCalls.length) msg.tool_calls = toolCalls;
   out.push(msg);
 }
 
-export function normalizeContent(content: AnthropicMessage["content"]): AnthropicContentBlock[] {
-  if (typeof content === "string") return [{ type: "text", text: content }];
-  return content;
-}
-
-function imageToUrl(block: Extract<AnthropicContentBlock, { type: "image" }>): string {
-  if (block.source.type === "url") return block.source.url;
-  return `data:${block.source.media_type};base64,${block.source.data}`;
-}
-
-function unsupportedToolResultBlockToString(block: AnthropicToolResultContentBlock): string {
-  const type = typeof block.type === "string" ? block.type : "unknown";
-  return `[unsupported content block omitted: ${type}]`;
-}
-
-function isToolResultTextBlock(
-  block: AnthropicToolResultContentBlock,
-): block is AnthropicTextBlock {
-  return block.type === "text" && typeof block.text === "string";
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === "object";
-}
-
-function isToolResultImageBlock(
-  block: AnthropicToolResultContentBlock,
-): block is AnthropicImageBlock {
-  if (block.type !== "image") return false;
-  const source = block.source;
-  if (!isRecord(source)) return false;
-  if (source.type === "url") return typeof source.url === "string";
-  return (
-    source.type === "base64" &&
-    typeof source.media_type === "string" &&
-    typeof source.data === "string"
-  );
-}
 
 export function toolResultContent(
   content: string | AnthropicToolResultContentBlock[],
@@ -291,28 +242,13 @@ export function toolResultContent(
     if (isToolResultTextBlock(b)) {
       parts.push({ type: "text", text: b.text });
     } else if (isToolResultImageBlock(b)) {
-      parts.push({ type: "image_url", image_url: { url: imageToUrl(b) } });
+      parts.push({ type: "image_url", image_url: { url: imageBlockToUrl(b) } });
     } else {
       parts.push({ type: "text", text: unsupportedToolResultBlockToString(b) });
     }
   }
   if (parts.length === 1 && parts[0]!.type === "text") return parts[0]!.text;
   return parts;
-}
-
-export function toolResultToString(content: string | AnthropicToolResultContentBlock[]): string {
-  // Kept for the token counter, which wants a flat string.
-  if (typeof content === "string") return content;
-  return content
-    .map((b) => {
-      if (isToolResultTextBlock(b)) return b.text;
-      if (isToolResultImageBlock(b)) {
-        const mt = b.source.type === "base64" ? b.source.media_type : "url";
-        return `[image omitted: ${mt}]`;
-      }
-      return unsupportedToolResultBlockToString(b);
-    })
-    .join("\n");
 }
 
 function toKimiTool(tool: AnthropicTool): KimiTool {
