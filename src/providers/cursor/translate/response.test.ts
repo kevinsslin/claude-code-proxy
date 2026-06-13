@@ -1,22 +1,19 @@
 import { describe, expect, it } from "bun:test";
 import { gzipSync } from "node:zlib";
 import { parseSseStream } from "../../../sse.ts";
-import type { CursorProto, ProtoClass, ProtoMessage } from "../proto-loader.ts";
 import { decodeCursorStream, encodeConnectFrame } from "../client.ts";
+import {
+  fakeProto,
+  frame,
+  jsonBytes,
+  streamFromChunks,
+} from "../cursor-test-helpers.ts";
 import {
   accumulateCursorResponse,
   cursorUsageToAnthropic,
   translateCursorStream,
 } from "./response.ts";
 import { createLogger } from "../../../log.ts";
-
-const encoder = new TextEncoder();
-const decoder = new TextDecoder();
-
-const fakeProto: CursorProto = {
-  AgentServerMessage: jsonProtoClass(),
-  AgentClientMessage: jsonProtoClass(),
-};
 
 describe("Cursor response translation", () => {
   it("maps usage tokens including cache reads and writes", () => {
@@ -272,42 +269,3 @@ describe("Cursor response translation", () => {
     expect(events[2]?.data.error.message).toContain("free requests limit");
   });
 });
-
-function jsonProtoClass(): ProtoClass {
-  return {
-    fromBinary(bytes: Uint8Array): ProtoMessage {
-      return messageFromJson(JSON.parse(decoder.decode(bytes)));
-    },
-    fromJson(json: unknown): ProtoMessage {
-      return messageFromJson(json);
-    },
-  };
-}
-
-function messageFromJson(json: unknown): ProtoMessage {
-  return {
-    toBinary(): Uint8Array {
-      return jsonBytes(json);
-    },
-    toJson(): unknown {
-      return json;
-    },
-  };
-}
-
-function frame(json: unknown): Uint8Array {
-  return encodeConnectFrame(jsonBytes(json));
-}
-
-function jsonBytes(json: unknown): Uint8Array {
-  return encoder.encode(JSON.stringify(json));
-}
-
-function streamFromChunks(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      for (const chunk of chunks) controller.enqueue(chunk);
-      controller.close();
-    },
-  });
-}

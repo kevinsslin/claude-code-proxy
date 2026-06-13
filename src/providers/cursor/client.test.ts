@@ -3,11 +3,14 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { decodeCursorStream, encodeConnectFrame, runCursorAgent } from "./client.ts";
-import type { CursorProto, ProtoClass, ProtoMessage } from "./proto-loader.ts";
+import {
+  decodeFrameJson,
+  fakeProtoMerged as fakeProto,
+  frame,
+  jsonBytes,
+  streamFromChunks,
+} from "./cursor-test-helpers.ts";
 import type { RequestContext } from "../types.ts";
-
-const encoder = new TextEncoder();
-const decoder = new TextDecoder();
 
 describe("Cursor protocol client", () => {
   it("acks exec setup and KV messages on the HTTP/2 Run stream", async () => {
@@ -478,60 +481,6 @@ describe("Cursor protocol client", () => {
     }
   });
 });
-
-const fakeProto: CursorProto = {
-  AgentServerMessage: jsonProtoClass(),
-  AgentClientMessage: jsonProtoClass(),
-};
-
-function jsonProtoClass(): ProtoClass {
-  return {
-    fromBinary(bytes: Uint8Array): ProtoMessage {
-      const json = JSON.parse(decoder.decode(bytes));
-      return messageFromJson(json);
-    },
-    fromJson(json: unknown): ProtoMessage {
-      return messageFromJson(json);
-    },
-  };
-}
-
-function messageFromJson(json: unknown): ProtoMessage {
-  return Object.assign(
-    {
-      toBinary(): Uint8Array {
-        return jsonBytes(json);
-      },
-      toJson(): unknown {
-        return json;
-      },
-    },
-    json && typeof json === "object" && !Array.isArray(json) ? json : {},
-  );
-}
-
-function frame(json: unknown): Uint8Array {
-  return encodeConnectFrame(jsonBytes(json));
-}
-
-function jsonBytes(json: unknown): Uint8Array {
-  return encoder.encode(JSON.stringify(json));
-}
-
-function decodeFrameJson(frame: Uint8Array): unknown {
-  const buf = Buffer.from(frame);
-  const len = buf.readUInt32BE(1);
-  return JSON.parse(decoder.decode(buf.subarray(5, 5 + len)));
-}
-
-function streamFromChunks(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      for (const chunk of chunks) controller.enqueue(chunk);
-      controller.close();
-    },
-  });
-}
 
 async function drain(stream: ReadableStream<Uint8Array>): Promise<void> {
   const reader = stream.getReader();

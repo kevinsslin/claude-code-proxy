@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { cursorProvider, createCursorProvider } from "./index.ts";
 import type { RequestContext } from "../types.ts";
 import { encodeConnectFrame, runCursorAgent } from "./client.ts";
-import type { CursorProto, ProtoClass, ProtoMessage } from "./proto-loader.ts";
+import {
+  decodeFrameJson,
+  fakeProtoMerged as fakeProto,
+  frame,
+  jsonBytes,
+  streamFromChunks,
+} from "./cursor-test-helpers.ts";
 import { parseSseStream } from "../../sse.ts";
 import { mkdir, mkdtemp, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -711,59 +717,4 @@ function jwt(payload: Record<string, unknown>): string {
     Buffer.from(JSON.stringify(payload)).toString("base64url"),
     "signature",
   ].join(".");
-}
-
-const encoder = new TextEncoder();
-const decoder = new TextDecoder();
-
-const fakeProto: CursorProto = {
-  AgentServerMessage: jsonProtoClass(),
-  AgentClientMessage: jsonProtoClass(),
-};
-
-function jsonProtoClass(): ProtoClass {
-  return {
-    fromBinary(bytes: Uint8Array): ProtoMessage {
-      return messageFromJson(JSON.parse(decoder.decode(bytes)));
-    },
-    fromJson(json: unknown): ProtoMessage {
-      return messageFromJson(json);
-    },
-  };
-}
-
-function messageFromJson(json: unknown): ProtoMessage {
-  return Object.assign(
-    {
-      toBinary(): Uint8Array {
-        return jsonBytes(json);
-      },
-      toJson(): unknown {
-        return json;
-      },
-    },
-    json && typeof json === "object" && !Array.isArray(json) ? json : {},
-  );
-}
-
-function frame(json: unknown): Uint8Array {
-  return encodeConnectFrame(jsonBytes(json));
-}
-
-function jsonBytes(json: unknown): Uint8Array {
-  return encoder.encode(JSON.stringify(json));
-}
-
-function decodeFrameJson(frame: Uint8Array): unknown {
-  const len = Buffer.from(frame).readUInt32BE(1);
-  return JSON.parse(decoder.decode(frame.slice(5, 5 + len)));
-}
-
-function streamFromChunks(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      for (const chunk of chunks) controller.enqueue(chunk);
-      controller.close();
-    },
-  });
 }
