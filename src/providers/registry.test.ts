@@ -22,6 +22,17 @@ function providersFor(model: string): string[] {
     .map((entry) => entry.provider);
 }
 
+function withAliasConfig<T>(aliasProvider: string, test: (configPath: string) => T): T {
+  const dir = mkdtempSync(join(tmpdir(), "ccp-alias-provider-"));
+  const configPath = join(dir, "config.json");
+  writeFileSync(configPath, JSON.stringify({ aliasProvider }));
+  try {
+    return test(configPath);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 describe("provider routing", () => {
   it("routes fast Codex model aliases after context suffix normalization", () => {
     expect(normalizeIncomingModel("gpt-5.4-fast[1m]")).toBe("gpt-5.4-fast");
@@ -51,27 +62,17 @@ describe("provider routing", () => {
   });
 
   it("routes aliases to Codex when config file selects Codex", () => {
-    const dir = mkdtempSync(join(tmpdir(), "ccp-alias-provider-"));
-    const path = join(dir, "config.json");
-    writeFileSync(path, JSON.stringify({ aliasProvider: "codex" }));
-    try {
+    withAliasConfig("codex", (path) => {
       loadConfig({ configPath: path, env: {}, forceReload: true });
       expect(providerForModel("claude-opus-4-7")?.name).toBe("codex");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   it("lets env override config file alias provider", () => {
-    const dir = mkdtempSync(join(tmpdir(), "ccp-alias-provider-"));
-    const path = join(dir, "config.json");
-    writeFileSync(path, JSON.stringify({ aliasProvider: "codex" }));
-    try {
+    withAliasConfig("codex", (path) => {
       loadConfig({ configPath: path, env: { CCP_ALIAS_PROVIDER: "kimi" }, forceReload: true });
       expect(providerForModel("haiku")?.name).toBe("kimi");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   it("lists aliases only under the active alias provider", () => {
