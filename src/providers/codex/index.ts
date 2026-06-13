@@ -1,12 +1,7 @@
 import type { AnthropicRequest } from "../../anthropic/schema.ts";
 import { wantsDownstreamStream } from "../../anthropic/stream.ts";
 import type { Provider, RequestContext } from "../types.ts";
-import {
-  anthropicErrorBody,
-  jsonError,
-  jsonResponse,
-  sseResponse,
-} from "../../anthropic/response.ts";
+import { jsonError, jsonResponse, sseResponse } from "../../anthropic/response.ts";
 import {
   ALLOWED_MODELS,
   assertAllowedModel,
@@ -24,6 +19,7 @@ import { summarizeCodexRequestSize, type CodexRequestSizeSummary } from "./reque
 import { codexPreviousResponseId, logVerbose } from "../../config.ts";
 import { clearContinuation, continuationCandidate, recordContinuation } from "./continuation.ts";
 import { codexCli } from "./cli.ts";
+import { mapUpstreamHttpErrorToResponse, mapUpstreamStreamErrorToResponse } from "../shared/upstream-errors.ts";
 
 interface SessionCountSnapshot {
   reqId: string;
@@ -298,19 +294,7 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
     clearContinuation(ctx.sessionId);
     if (err instanceof CodexError) {
       log.warn("codex error", { status: err.status, detail: err.detail });
-      if (err.status === 429) {
-        const headers: Record<string, string> = {};
-        if (err.meta?.retryAfter) headers["retry-after"] = err.meta.retryAfter;
-        return jsonResponse(
-          anthropicErrorBody("rate_limit_error", err.detail || err.message),
-          {
-            status: 429,
-            headers,
-          },
-        );
-      }
-      const type = err.status === 401 || err.status === 403 ? "authentication_error" : "api_error";
-      return jsonError(err.status, type, err.detail || err.message);
+      return mapUpstreamHttpErrorToResponse(err);
     }
     throw err;
   }
@@ -412,15 +396,7 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
         kind: err.kind,
         message: err.message,
       });
-      if (err.kind === "rate_limit") {
-        const headers: Record<string, string> = {};
-        if (err.retryAfterSeconds) headers["retry-after"] = String(err.retryAfterSeconds);
-        return jsonResponse(
-          anthropicErrorBody("rate_limit_error", err.message),
-          { status: 429, headers },
-        );
-      }
-      return jsonError(502, "api_error", err.message);
+      return mapUpstreamStreamErrorToResponse(err);
     }
     throw err;
   }

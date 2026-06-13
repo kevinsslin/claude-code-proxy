@@ -3,6 +3,7 @@ import { runDeviceLogin } from "./auth/device.ts";
 import { persistInitialTokens } from "./auth/manager.ts";
 import { runBrowserLogin } from "./auth/pkce.ts";
 import { authPath, clearAuth, loadAuth } from "./auth/token-store.ts";
+import { printAuthStatus } from "../shared/cli-status.ts";
 
 export const codexCli: CliHandlers = {
   async login() {
@@ -18,15 +19,11 @@ export const codexCli: CliHandlers = {
     if (saved.accountId) console.log(`Account: ${saved.accountId}`);
   },
   async status() {
-    const auth = await loadAuth();
-    if (!auth) {
-      console.log("Not authenticated");
-      process.exit(1);
-    }
-    const ms = auth.expires - Date.now();
-    console.log(`Account: ${auth.accountId ?? "(none)"}`);
-    console.log(`Expires: ${new Date(auth.expires).toISOString()} (in ${Math.floor(ms / 1000)}s)`);
-    console.log(`Storage: ${authPath()}`);
+    await printAuthStatus({
+      loadAuth,
+      authPath,
+      formatIdentityLine: (auth) => `Account: ${auth.accountId ?? "(none)"}`,
+    });
   },
   async logout() {
     await clearAuth();

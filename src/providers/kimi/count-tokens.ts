@@ -6,6 +6,7 @@ import {
   normalizeContent,
   toolResultToString,
 } from "../translate/anthropic-content.ts";
+import { countToolSchemaTokens } from "../shared/tool-schema.ts";
 
 const IMAGE_TOKEN_ESTIMATE = 2000;
 
@@ -34,11 +35,12 @@ export function countTokens(req: AnthropicRequest): number {
     }
   }
 
-  for (const tool of req.tools ?? []) {
-    total += encode(tool.name).length;
-    if (tool.description) total += encode(tool.description).length;
-    total += encode(JSON.stringify(tool.input_schema ?? {})).length;
-  }
+  total += countToolSchemaTokens(
+    req.tools,
+    (tool) => tool.name,
+    (tool) => tool.description,
+    (tool) => tool.input_schema,
+  );
 
   total += req.messages.length * 4;
   return total;
@@ -75,11 +77,12 @@ export function countTranslatedTokens(req: KimiChatRequest): number {
     }
   }
 
-  for (const tool of req.tools ?? []) {
-    total += encode(tool.function.name).length;
-    if (tool.function.description) total += encode(tool.function.description).length;
-    total += encode(JSON.stringify(tool.function.parameters ?? {})).length;
-  }
+  total += countToolSchemaTokens(
+    req.tools,
+    (tool) => tool.function.name,
+    (tool) => tool.function.description,
+    (tool) => tool.function.parameters,
+  );
 
   total += req.messages.length * 4;
   return total;
