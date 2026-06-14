@@ -1,10 +1,7 @@
 import { encode } from "gpt-tokenizer/model/gpt-4o";
 import type { AnthropicRequest } from "../../anthropic/schema.ts";
 import type { ResponsesRequest } from "./translate/request.ts";
-import {
-  countAnthropicTokens,
-  IMAGE_TOKEN_ESTIMATE,
-} from "../shared/count-tokens.ts";
+import { countAnthropicTokens, IMAGE_TOKEN_ESTIMATE } from "../shared/count-tokens.ts";
 import { countToolSchemaTokens } from "../shared/tool-schema.ts";
 
 export function countTokens(req: AnthropicRequest): number {
@@ -38,9 +35,9 @@ export function countTranslatedTokens(
 
   total += countToolSchemaTokens(
     req.tools,
-    (tool) => tool.name,
-    (tool) => tool.description,
-    (tool) => tool.parameters,
+    (tool) => ("name" in tool ? tool.name : tool.type),
+    (tool) => ("description" in tool ? tool.description : undefined),
+    (tool) => ("parameters" in tool ? tool.parameters : undefined),
   );
 
   if (req.text?.format?.type === "json_schema") {

@@ -35,6 +35,55 @@ describe("translateRequest", () => {
     expect(translated.include).toEqual(["reasoning.encrypted_content"]);
   });
 
+  it("translates Anthropic web search to the Codex hosted web_search tool", () => {
+    const translated = translateRequest({
+      ...baseRequest,
+      tools: [
+        {
+          type: "web_search_20250305",
+          name: "web_search",
+          allowed_domains: [],
+          blocked_domains: [],
+          max_uses: 8,
+        },
+      ],
+    });
+
+    expect(translated.tools).toEqual([
+      {
+        type: "web_search",
+        external_web_access: false,
+        search_content_types: ["text", "image"],
+      },
+    ]);
+  });
+
+  it("preserves non-empty Anthropic web search domain filters", () => {
+    const translated = translateRequest({
+      ...baseRequest,
+      tools: [
+        {
+          type: "web_search_20250305",
+          name: "web_search",
+          allowed_domains: ["github.com"],
+          blocked_domains: ["example.com"],
+        },
+      ],
+    });
+
+    expect(translated.tools).toEqual([
+      {
+        type: "web_search",
+        external_web_access: false,
+        search_content_types: ["text", "image"],
+        filters: {
+          allowed_domains: ["github.com"],
+          blocked_domains: ["example.com"],
+        },
+      },
+    ]);
+  });
+
   it("normalizes fast service tier to upstream priority", () => {
     loadConfig({ env: { CCP_CODEX_SERVICE_TIER: "fast" }, forceReload: true });
 

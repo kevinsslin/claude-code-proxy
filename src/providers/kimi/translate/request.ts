@@ -221,7 +221,6 @@ function pushAssistantMessage(out: KimiMessage[], blocks: AnthropicContentBlock[
   out.push(msg);
 }
 
-
 export function toolResultContent(
   content: string | AnthropicToolResultContentBlock[],
   isError: boolean | undefined,
@@ -249,8 +248,8 @@ function toKimiTool(tool: AnthropicTool): KimiTool {
     type: "function",
     function: {
       name: tool.name,
-      description: tool.description,
-      parameters: tool.input_schema,
+      description: "description" in tool ? tool.description : undefined,
+      parameters: "input_schema" in tool ? tool.input_schema : {},
     },
   };
 }

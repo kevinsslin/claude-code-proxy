@@ -8,8 +8,8 @@ export function countCursorTokens(req: AnthropicRequest): number {
   total += countToolSchemaTokens(
     req.tools,
     (tool) => tool.name,
-    (tool) => tool.description,
-    (tool) => tool.input_schema,
+    (tool) => ("description" in tool ? tool.description : undefined),
+    (tool) => ("input_schema" in tool ? tool.input_schema : {}),
   );
   return total;
 }

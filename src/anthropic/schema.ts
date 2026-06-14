@@ -49,11 +49,22 @@ export interface AnthropicMessage {
   content: string | AnthropicContentBlock[];
 }
 
-export interface AnthropicTool {
+export interface AnthropicFunctionTool {
+  type?: "function" | "custom";
   name: string;
   description?: string;
   input_schema: unknown;
 }
+
+export interface AnthropicWebSearchTool {
+  type: "web_search_20250305";
+  name: string;
+  allowed_domains?: string[];
+  blocked_domains?: string[];
+  max_uses?: number;
+}
+
+export type AnthropicTool = AnthropicFunctionTool | AnthropicWebSearchTool;
 
 export interface AnthropicRequest {
   model: string;

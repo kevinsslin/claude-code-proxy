@@ -91,12 +91,24 @@ export type ResponsesContentPart =
   | { type: "output_text"; text: string }
   | { type: "input_image"; image_url: string; detail?: "auto" | "low" | "high" };
 
-export interface ResponsesTool {
+export type ResponsesTool = ResponsesFunctionTool | ResponsesWebSearchTool;
+
+export interface ResponsesFunctionTool {
   type: "function";
   name: string;
   description?: string;
   parameters: unknown;
   strict?: boolean;
+}
+
+export interface ResponsesWebSearchTool {
+  type: "web_search";
+  external_web_access: boolean;
+  search_content_types: Array<"text" | "image">;
+  filters?: {
+    allowed_domains?: string[];
+    blocked_domains?: string[];
+  };
 }
 
 export interface TranslateOptions {
@@ -271,6 +283,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function toResponsesTool(tool: AnthropicTool): ResponsesTool {
+  if (tool.type === "web_search_20250305") {
+    const filters: ResponsesWebSearchTool["filters"] = {};
+    if (tool.allowed_domains?.length) filters.allowed_domains = tool.allowed_domains;
+    if (tool.blocked_domains?.length) filters.blocked_domains = tool.blocked_domains;
+    return {
+      type: "web_search",
+      external_web_access: false,
+      search_content_types: ["text", "image"],
+      ...(Object.keys(filters).length ? { filters } : {}),
+    };
+  }
   return {
     type: "function",
     name: tool.name,

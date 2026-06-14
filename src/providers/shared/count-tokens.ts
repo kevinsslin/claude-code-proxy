@@ -4,7 +4,7 @@ import {
   normalizeContent,
   toolResultToString,
 } from "../translate/anthropic-content.ts";
-import type { AnthropicRequest } from "../../anthropic/schema.ts";
+import type { AnthropicRequest, AnthropicTool } from "../../anthropic/schema.ts";
 
 export const IMAGE_TOKEN_ESTIMATE = 2000;
 
@@ -32,15 +32,10 @@ export function countAnthropicTokens(
     req,
     countToken,
     tools: req.tools,
-    readToolName: (tool: { name: string; description?: string; input_schema: unknown }) =>
-      tool.name,
-    readToolDescription: (tool: {
-      name: string;
-      description?: string;
-      input_schema: unknown;
-    }) => tool.description,
-    readToolSchema: (tool: { name: string; description?: string; input_schema: unknown }) =>
-      tool.input_schema,
+    readToolName: (tool: AnthropicTool) => tool.name,
+    readToolDescription: (tool: AnthropicTool) =>
+      "description" in tool ? tool.description : undefined,
+    readToolSchema: (tool: AnthropicTool) => ("input_schema" in tool ? tool.input_schema : {}),
   };
   if (includeThinking) {
     return countAnthropicRequestTokensWithSystem({ ...base, includeThinking: true });
@@ -72,17 +67,15 @@ export function countAnthropicRequestTokens<TTool>(
   },
 ): number;
 
-export function countAnthropicRequestTokens<TTool>(
-  {
-    req,
-    countToken,
-    tools,
-    readToolName,
-    readToolDescription,
-    readToolSchema,
-    includeThinking = false,
-  }: CountAnthropicRequestTokenOptions<TTool> & { includeThinking?: boolean },
-): number {
+export function countAnthropicRequestTokens<TTool>({
+  req,
+  countToken,
+  tools,
+  readToolName,
+  readToolDescription,
+  readToolSchema,
+  includeThinking = false,
+}: CountAnthropicRequestTokenOptions<TTool> & { includeThinking?: boolean }): number {
   let total = 0;
   for (const msg of req.messages) {
     const blocks = normalizeContent(msg.content);
@@ -102,12 +95,7 @@ export function countAnthropicRequestTokens<TTool>(
     }
   }
 
-  total += countToolSchemaTokens(
-    tools,
-    readToolName,
-    readToolDescription,
-    readToolSchema,
-  );
+  total += countToolSchemaTokens(tools, readToolName, readToolDescription, readToolSchema);
 
   total += req.messages.length * 4;
   return total;

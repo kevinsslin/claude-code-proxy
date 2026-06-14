@@ -266,6 +266,9 @@ the UI as `◐ medium · /effort`) is forwarded as Codex `reasoning.effort` (`lo
 `xhigh`. An explicit `codex.effort` / `CCP_CODEX_EFFORT` override still takes
 precedence and can also force `none`.
 
+Claude Code's hosted `web_search_20250305` tool is translated to Codex's native
+Responses `web_search` tool, including non-empty domain filters.
+
 Confirmed working on **Plus**:
 
 - `gpt-5.4`

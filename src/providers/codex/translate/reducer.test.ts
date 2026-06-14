@@ -1,10 +1,19 @@
 import { describe, expect, it } from "bun:test";
 import { reduceUpstream } from "./reducer.ts";
-import { sse, silentLog, upstreamFromChunks } from "./test-helpers.ts";
+import {
+  sse,
+  silentLog,
+  upstreamFromChunks,
+  upstreamThatErrorsAfterChunks,
+} from "./test-helpers.ts";
 
 async function events(chunks: string[]) {
+  return collectEvents(upstreamFromChunks(chunks));
+}
+
+async function collectEvents(upstream: ReadableStream<Uint8Array>) {
   const out = [];
-  for await (const event of reduceUpstream(upstreamFromChunks(chunks), silentLog)) out.push(event);
+  for await (const event of reduceUpstream(upstream, silentLog)) out.push(event);
   return out;
 }
 
@@ -70,6 +79,93 @@ describe("reduceUpstream finish metadata", () => {
           call_id: "call_1",
           name: "Read",
           arguments: '{"file_path":"/tmp/a"}',
+        },
+      ],
+    });
+  });
+
+  it("treats hosted web search response events as progress", async () => {
+    const out = await events([
+      sse("response.output_item.added", {
+        output_index: 0,
+        item: { type: "web_search_call", id: "ws_1", status: "in_progress" },
+      }),
+      sse("response.web_search_call.in_progress", { output_index: 0, item_id: "ws_1" }),
+      sse("response.web_search_call.searching", { output_index: 0, item_id: "ws_1" }),
+      sse("response.web_search_call.completed", { output_index: 0, item_id: "ws_1" }),
+      sse("response.output_item.done", {
+        output_index: 0,
+        item: { type: "web_search_call", id: "ws_1", status: "completed" },
+      }),
+      sse("response.output_item.added", {
+        output_index: 1,
+        item: { type: "message", id: "msg_upstream" },
+      }),
+      sse("response.output_text.delta", { output_index: 1, delta: "result text" }),
+      sse("response.output_item.done", {
+        output_index: 1,
+        item: { type: "message", id: "msg_upstream" },
+      }),
+      sse("response.completed", { response: { id: "resp_1", usage: { input_tokens: 3 } } }),
+    ]);
+
+    expect(out.filter((event) => event.kind === "progress").length).toBeGreaterThanOrEqual(4);
+    expect(out.at(-1)).toEqual({
+      kind: "finish",
+      stopReason: "end_turn",
+      terminalType: "response.completed",
+      continuationEligible: true,
+      usage: { input_tokens: 3 },
+      responseId: "resp_1",
+      outputItems: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "result text" }],
+        },
+      ],
+    });
+  });
+
+  it("finishes completed tool calls when the Codex WebSocket closes before a terminal event", async () => {
+    const out = await collectEvents(
+      upstreamThatErrorsAfterChunks(
+        [
+          sse("response.output_item.added", {
+            output_index: 0,
+            item: { type: "function_call", call_id: "call_1", name: "WebSearch" },
+          }),
+          sse("response.function_call_arguments.done", {
+            output_index: 0,
+            arguments: '{"query":"claude-code-proxy github"}',
+          }),
+          sse("response.output_item.done", {
+            output_index: 0,
+            item: {
+              type: "function_call",
+              call_id: "call_1",
+              name: "WebSearch",
+              arguments: '{"query":"claude-code-proxy github"}',
+            },
+          }),
+        ],
+        new Error("Codex WebSocket connection closed"),
+      ),
+    );
+
+    expect(out.at(-1)).toEqual({
+      kind: "finish",
+      stopReason: "tool_use",
+      terminalType: "response.incomplete",
+      continuationEligible: false,
+      usage: undefined,
+      responseId: undefined,
+      outputItems: [
+        {
+          type: "function_call",
+          call_id: "call_1",
+          name: "WebSearch",
+          arguments: '{"query":"claude-code-proxy github"}',
         },
       ],
     });

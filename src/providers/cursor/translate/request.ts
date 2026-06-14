@@ -30,8 +30,8 @@ export function renderCursorPrompt(req: AnthropicRequest): string {
         .map((tool) =>
           JSON.stringify({
             name: tool.name,
-            description: tool.description,
-            input_schema: tool.input_schema,
+            description: "description" in tool ? tool.description : undefined,
+            input_schema: "input_schema" in tool ? tool.input_schema : {},
           }),
         )
         .join("\n")}\n</tools>`,
@@ -90,7 +90,7 @@ function renderBlock(block: AnthropicContentBlock): string {
     case "tool_use":
       return `<tool_use id="${block.id}" name="${block.name}">\n${JSON.stringify(block.input ?? {})}\n</tool_use>`;
     case "tool_result":
-      return `<tool_result tool_use_id="${block.tool_use_id}"${block.is_error ? " is_error=\"true\"" : ""}>\n${renderToolResult(block.content)}\n</tool_result>`;
+      return `<tool_result tool_use_id="${block.tool_use_id}"${block.is_error ? ' is_error="true"' : ""}>\n${renderToolResult(block.content)}\n</tool_result>`;
   }
 }
 
@@ -100,7 +100,13 @@ function renderToolResult(content: AnthropicToolResultContentBlock[] | string): 
 }
 
 function renderToolResultBlock(block: AnthropicToolResultContentBlock): string {
-  if (block.type === "text" || block.type === "image" || block.type === "tool_use" || block.type === "tool_result" || block.type === "thinking") {
+  if (
+    block.type === "text" ||
+    block.type === "image" ||
+    block.type === "tool_use" ||
+    block.type === "tool_result" ||
+    block.type === "thinking"
+  ) {
     return renderBlock(block as AnthropicContentBlock);
   }
   const type = typeof block.type === "string" ? block.type : "unknown";
@@ -108,17 +114,28 @@ function renderToolResultBlock(block: AnthropicToolResultContentBlock): string {
 }
 
 function messageBlocks(message: AnthropicMessage): AnthropicContentBlock[] {
-  return typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content;
+  return typeof message.content === "string"
+    ? [{ type: "text", text: message.content }]
+    : message.content;
 }
 
-function collectImageBlocks(block: AnthropicContentBlock, visit: (block: AnthropicImageBlock) => void): void {
+function collectImageBlocks(
+  block: AnthropicContentBlock,
+  visit: (block: AnthropicImageBlock) => void,
+): void {
   if (block.type === "image") {
     visit(block);
     return;
   }
   if (block.type !== "tool_result" || typeof block.content === "string") return;
   for (const child of block.content) {
-    if (child.type === "text" || child.type === "image" || child.type === "tool_use" || child.type === "tool_result" || child.type === "thinking") {
+    if (
+      child.type === "text" ||
+      child.type === "image" ||
+      child.type === "tool_use" ||
+      child.type === "tool_result" ||
+      child.type === "thinking"
+    ) {
       collectImageBlocks(child as AnthropicContentBlock, visit);
     }
   }

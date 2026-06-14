@@ -92,7 +92,11 @@ function inputImageParts(input: ResponsesInputItem[]) {
 
 function largestTools(tools: ResponsesRequest["tools"]) {
   return (tools ?? [])
-    .map((tool, index) => ({ index, name: tool.name, jsonBytes: jsonBytes(tool) }))
+    .map((tool, index) => ({
+      index,
+      name: "name" in tool ? tool.name : tool.type,
+      jsonBytes: jsonBytes(tool),
+    }))
     .sort((a, b) => b.jsonBytes - a.jsonBytes)
     .slice(0, 5);
 }

@@ -234,6 +234,15 @@ export async function* reduceUpstream(
   let continuationEligible = false;
   let incomplete = false;
 
+  function canFinishAfterClosedCompletedToolCall(err: unknown): boolean {
+    return (
+      sawToolUse &&
+      outputItemsByIndex.size > 0 &&
+      blocksByOutputIndex.size === 0 &&
+      isCodexWebSocketCloseError(err)
+    );
+  }
+
   function captureOutputItem(outputIndex: number, state: BlockState): void {
     if (state.kind === "text") {
       if (!state.textAccum) return;
@@ -258,6 +267,18 @@ export async function* reduceUpstream(
     try {
       next = await events.next();
     } catch (err) {
+      if (canFinishAfterClosedCompletedToolCall(err)) {
+        diagnostics.sawTerminalEvent = true;
+        terminalType = "response.incomplete";
+        incomplete = false;
+        continuationEligible = false;
+        log.warn("upstream websocket closed after completed tool call", {
+          err: err instanceof Error ? err.message : String(err),
+          lastEventType: diagnostics.lastEventType,
+          stats: diagnostics.stats,
+        });
+        break;
+      }
       throw upstreamReadError(err);
     }
     if (next.done) break;
@@ -292,6 +313,14 @@ export async function* reduceUpstream(
       yield { kind: "progress" };
       continue;
     }
+    if (
+      t === "response.web_search_call.in_progress" ||
+      t === "response.web_search_call.searching" ||
+      t === "response.web_search_call.completed"
+    ) {
+      yield { kind: "progress" };
+      continue;
+    }
     if (t === "response.failed" || t === "response.error" || t === "error") {
       const message = p?.response?.error?.message || p?.error?.message || "Upstream error";
       throw new UpstreamStreamError("failed", message);
@@ -302,6 +331,10 @@ export async function* reduceUpstream(
       const outputIndex: number = p.output_index;
       if (!item) continue;
       if (item.type === "reasoning") continue;
+      if (item.type === "web_search_call") {
+        yield { kind: "progress" };
+        continue;
+      }
       if (item.type === "message") {
         const idx = anthropicIndex++;
         blocksByOutputIndex.set(outputIndex, { kind: "text", index: idx, textAccum: "" });
@@ -500,6 +533,14 @@ export async function* reduceUpstream(
     responseId,
     outputItems,
   };
+}
+
+function isCodexWebSocketCloseError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return (
+    message.includes("Codex WebSocket connection closed") ||
+    message.includes("Codex WebSocket closed before terminal event")
+  );
 }
 
 function upstreamReadError(err: unknown): Error {

@@ -19,7 +19,10 @@ import { summarizeCodexRequestSize, type CodexRequestSizeSummary } from "./reque
 import { codexPreviousResponseId, logVerbose } from "../../config.ts";
 import { clearContinuation, continuationCandidate, recordContinuation } from "./continuation.ts";
 import { codexCli } from "./cli.ts";
-import { mapUpstreamHttpErrorToResponse, mapUpstreamStreamErrorToResponse } from "../shared/upstream-errors.ts";
+import {
+  mapUpstreamHttpErrorToResponse,
+  mapUpstreamStreamErrorToResponse,
+} from "../shared/upstream-errors.ts";
 
 interface SessionCountSnapshot {
   reqId: string;
@@ -56,7 +59,7 @@ function sessionState(sessionId?: string): SessionTimelineState | undefined {
 }
 
 function readToolSchemaSummary(
-  tools: { name: string; parameters: unknown; strict?: boolean }[] | undefined,
+  tools: { type?: string; name?: string; parameters?: unknown; strict?: boolean }[] | undefined,
 ) {
   const read = tools?.find((tool) => tool.name === "Read");
   if (!read) return undefined;

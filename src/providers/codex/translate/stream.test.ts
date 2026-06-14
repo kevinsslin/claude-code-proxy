@@ -35,7 +35,7 @@ function readChunks(deltas: string[], includeDone = true): string[] {
       ? [
           sse("response.output_item.done", {
             output_index: 0,
-            item: { type: "function_call", arguments: "{\"file_path\":\"/tmp/a\"}" },
+            item: { type: "function_call", arguments: '{"file_path":"/tmp/a"}' },
           }),
         ]
       : []),
@@ -76,7 +76,7 @@ function collectWithTime(chunks: string[]): Promise<string> {
 describe("translateStream", () => {
   it("emits keepalive pings while Read arguments are buffered", async () => {
     const chunks = [
-      ...readChunks(["{\"file_path\"", "\":\"/tmp/a\"}"]),
+      ...readChunks(['{"file_path"', '":"/tmp/a"}']),
       sse("response.completed", { response: { usage: {} } }),
     ];
 
@@ -110,7 +110,7 @@ describe("translateStream", () => {
   });
 
   it("emits an error instead of message_stop when upstream ends with an open Read block", async () => {
-    const chunks = readChunks(["{\"file_path\"", ':"/tmp/a"'], false);
+    const chunks = readChunks(['{"file_path"', ':"/tmp/a"'], false);
 
     const output = await collectFromChunks(chunks);
 
@@ -123,7 +123,7 @@ describe("translateStream", () => {
   });
 
   it("reports upstream read failures as upstream stream errors", async () => {
-    const chunks = readChunks(["{\"file_path\""], false);
+    const chunks = readChunks(['{"file_path"'], false);
     const err = new DOMException("The connection was closed.", "AbortError");
     const logs: Array<{ msg: string; fields: unknown }> = [];
     const log = {
@@ -139,15 +139,56 @@ describe("translateStream", () => {
       }),
     );
 
-    expect(output.indexOf("event: content_block_stop")).toBeLessThan(output.indexOf("event: error"));
+    expect(output.indexOf("event: content_block_stop")).toBeLessThan(
+      output.indexOf("event: error"),
+    );
     expect(output).toContain("event: error");
     expect(output).toContain("Upstream stream read failed: The connection was closed.");
     expect(output).not.toContain("input_json_delta");
     expect(logs.some((entry) => entry.msg === "upstream stream error")).toBe(true);
   });
 
+  it("emits tool_use stop when Codex closes after a completed tool call", async () => {
+    const chunks = [
+      sse("response.output_item.added", {
+        output_index: 0,
+        item: { type: "function_call", call_id: "call_search", name: "WebSearch" },
+      }),
+      sse("response.function_call_arguments.done", {
+        output_index: 0,
+        arguments: '{"query":"claude-code-proxy github"}',
+      }),
+      sse("response.output_item.done", {
+        output_index: 0,
+        item: {
+          type: "function_call",
+          call_id: "call_search",
+          name: "WebSearch",
+          arguments: '{"query":"claude-code-proxy github"}',
+        },
+      }),
+    ];
+
+    const output = await collect(
+      translateStream(
+        upstreamThatErrorsAfterChunks(chunks, new Error("Codex WebSocket connection closed")),
+        {
+          messageId: "msg_1",
+          model: "gpt-5.5",
+          log: silentLog,
+        },
+      ),
+    );
+
+    expect(output).toContain("event: content_block_start");
+    expect(output).toContain("input_json_delta");
+    expect(output).toContain('"stop_reason":"tool_use"');
+    expect(output).toContain("event: message_stop");
+    expect(output).not.toContain("event: error");
+  });
+
   it("fails buffered Read arguments that exceed the safe duration", async () => {
-    const chunks = readChunks(["{\"file_path\"", ':"/tmp/a"'], false);
+    const chunks = readChunks(['{"file_path"', ':"/tmp/a"'], false);
 
     const output = await withMockNow(() =>
       collectFromChunks(chunks, {
