@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.0.20 (2026-06-15)
 
 - Cursor's generic `cursor`, `cursor-agent`, `cursor-plan`, and `cursor-ask` aliases now use Cursor default model selection instead of forcing Composer 2.5 fast mode.
 
