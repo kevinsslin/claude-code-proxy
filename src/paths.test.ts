@@ -10,6 +10,12 @@ import {
 } from "./paths.ts";
 
 describe("resolveConfigDir", () => {
+  it("uses CCP_CONFIG_DIR when set", () => {
+    expect(
+      resolveConfigDir({ platform: "darwin", env: { CCP_CONFIG_DIR: "/tmp/ccp-a" }, home: "/home/u" }),
+    ).toBe("/tmp/ccp-a");
+  });
+
   it("uses ~/.config on darwin even when XDG_CONFIG_HOME is set", () => {
     expect(
       resolveConfigDir({ platform: "darwin", env: { XDG_CONFIG_HOME: "/x" }, home: "/home/u" }),

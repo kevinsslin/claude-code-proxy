@@ -82,7 +82,8 @@ tokens. It does not read Cursor Agent's Keychain/auth.json. You can also set
 On macOS credentials go to Keychain. On Windows they are written under
 `%APPDATA%\claude-code-proxy\<provider>\auth.json`; on Linux they are written
 under `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/<provider>/auth.json`
-(mode 0600 where supported).
+(mode 0600 where supported). Set `CCP_CONFIG_DIR` before `cursor auth login` to
+store a separate Cursor login at `$CCP_CONFIG_DIR/cursor/auth.json`.
 
 Verify:
 
@@ -590,7 +591,8 @@ config file is optional — env-var-only setups continue to work unchanged.
 The file lives at `~/.config/claude-code-proxy/config.json` on macOS
 (deliberately not `~/Library`), at `%APPDATA%\claude-code-proxy\config.json` on
 Windows, and at
-`${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/config.json` on Linux.
+`${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/config.json` on Linux. Set
+`CCP_CONFIG_DIR` to use a separate config and auth directory for that process.
 
 ```json
 {
@@ -626,6 +628,7 @@ Windows, and at
 | Variable                         | Config key                 | Default                                           | Purpose                                                                                                                          |
 | -------------------------------- | -------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | `PORT`                           | `port`                     | `18765`                                           | Proxy listen port                                                                                                                |
+| `CCP_CONFIG_DIR`                 | unset                      | platform config dir                               | Per-process config directory; Cursor auth uses it for file storage                                                               |
 | `XDG_STATE_HOME`                 | —                          | `~/.local/state`                                  | Linux/macOS base dir for `proxy.log`                                                                                             |
 | `CCP_LOG_STDERR`                 | `log.stderr`               | unset                                             | Also mirror log lines to stderr                                                                                                  |
 | `CCP_LOG_VERBOSE`                | `log.verbose`              | unset                                             | Log full request/response bodies + every SSE event                                                                               |
@@ -686,7 +689,8 @@ sticky sessions or shared state before enabling continuation.
 - `config.json` — optional configuration file (see table above). It lives at
   `~/.config/claude-code-proxy/config.json` on macOS,
   `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/config.json` on Linux,
-  and `%APPDATA%\claude-code-proxy\config.json` on Windows.
+  and `%APPDATA%\claude-code-proxy\config.json` on Windows. `CCP_CONFIG_DIR`
+  replaces the platform config directory for the current process.
 - Codex tokens — macOS uses Keychain under service `claude-code-proxy.codex`.
   Linux uses
   `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/codex/auth.json`.
@@ -702,7 +706,9 @@ sticky sessions or shared state before enabling continuation.
 - Cursor tokens — macOS uses Keychain under service
   `claude-code-proxy.cursor`. Linux uses
   `${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy/cursor/auth.json`.
-  Windows uses `%APPDATA%\claude-code-proxy\cursor\auth.json`.
+  Windows uses `%APPDATA%\claude-code-proxy\cursor\auth.json`. When
+  `CCP_CONFIG_DIR` is set, Cursor tokens are written to `cursor/auth.json` under
+  that directory, including on macOS.
   `CCP_CURSOR_AUTH_TOKEN` overrides local proxy-owned storage.
 
 ## Limitations

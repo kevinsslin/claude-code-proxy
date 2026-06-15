@@ -27,11 +27,13 @@ const KEYCHAIN_SERVICE = "claude-code-proxy.cursor";
 const KEYCHAIN_ACCOUNT = "auth";
 const REFRESH_EXPIRY_SKEW_MS = 60_000;
 
+type CursorAuthStorage = "file" | "keychain";
+
 export async function loadCursorAuth(env: NodeJS.ProcessEnv = process.env): Promise<CursorAuth | undefined> {
   const envToken = env.CCP_CURSOR_AUTH_TOKEN || env.CURSOR_AUTH_TOKEN;
   if (envToken) return authFromToken(envToken, "environment");
 
-  if (process.platform === "darwin") {
+  if (cursorAuthStorage() === "keychain") {
     const raw = keychainGet(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
     if (!raw) return undefined;
     const parsed = JSON.parse(raw) as CursorAuthFile;
@@ -53,7 +55,7 @@ export async function loadCursorAuth(env: NodeJS.ProcessEnv = process.env): Prom
 }
 
 export async function clearCursorAuth(): Promise<void> {
-  if (process.platform === "darwin") {
+  if (cursorAuthStorage() === "keychain") {
     keychainDelete(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
     return;
   }
@@ -69,7 +71,7 @@ export async function clearCursorAuth(): Promise<void> {
 
 export async function saveCursorAuth(auth: CursorAuthFile): Promise<CursorAuth> {
   if (!auth.accessToken) throw new Error("Cursor auth accessToken is required");
-  if (process.platform === "darwin") {
+  if (cursorAuthStorage() === "keychain") {
     keychainSet(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, JSON.stringify(auth));
     return enrich({ ...auth, accessToken: auth.accessToken, source: cursorAuthLocation() });
   }
@@ -80,7 +82,7 @@ export async function saveCursorAuth(auth: CursorAuthFile): Promise<CursorAuth> 
 }
 
 export function cursorAuthLocation(): string {
-  return process.platform === "darwin" ? "macOS Keychain (claude-code-proxy.cursor)" : cursorAuthFile();
+  return cursorAuthStorage() === "keychain" ? "macOS Keychain (claude-code-proxy.cursor)" : cursorAuthFile();
 }
 
 export function missingAuthMessage(): string {
@@ -139,6 +141,18 @@ async function refreshCursorAuth(refreshToken: string): Promise<{ accessToken: s
 
 function authFileCandidates(): string[] {
   const primary = cursorAuthFile();
+  if (hasConfigDirOverride()) return [primary];
   const legacy = join(legacyConfigDir(), "cursor", "auth.json");
   return legacy === primary ? [primary] : [primary, legacy];
+}
+
+function cursorAuthStorage(): CursorAuthStorage {
+  if (process.platform === "darwin" && !hasConfigDirOverride()) {
+    return "keychain";
+  }
+  return "file";
+}
+
+function hasConfigDirOverride(): boolean {
+  return !!process.env.CCP_CONFIG_DIR;
 }

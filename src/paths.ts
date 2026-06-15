@@ -7,6 +7,10 @@ export interface DirResolverEnv {
   home: string;
 }
 
+function explicitConfigDir(deps: DirResolverEnv): string | undefined {
+  return deps.env.CCP_CONFIG_DIR;
+}
+
 function defaults(): DirResolverEnv {
   return { platform: process.platform, env: process.env, home: homedir() };
 }
@@ -27,6 +31,9 @@ function windowsLocalAppData(deps: DirResolverEnv): string {
 // (which would redirect to ~/Library/Application Support). This matches where
 // auth tokens have always been stored on macOS.
 export function resolveConfigDir(deps: DirResolverEnv): string {
+  const override = explicitConfigDir(deps);
+  if (override) return override;
+
   const path = pathFor(deps.platform);
   if (deps.platform === "win32") {
     return path.join(windowsRoamingAppData(deps), "claude-code-proxy");
