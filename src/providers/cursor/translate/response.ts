@@ -1,7 +1,13 @@
 import { encodeSseEvent } from "../../../sse.ts";
 import type { Logger } from "../../../log.ts";
+import { computeBackoffDelay, MAX_RATE_LIMIT_RETRIES, sleep, type BackoffOutcome } from "../../retry.ts";
 import type { TrafficCapture } from "../../types.ts";
-import { decodeCursorStream, type CursorStreamEvent, type CursorUsage } from "../client.ts";
+import {
+  decodeCursorStream,
+  isRetryableCursorNetworkResourceError,
+  type CursorStreamEvent,
+  type CursorUsage,
+} from "../client.ts";
 import type { CursorProto } from "../proto-loader.ts";
 import { createCursorSseFramer } from "../sse-framing.ts";
 import {
@@ -162,91 +168,139 @@ export function translateCursorStream(
     onSession?: (sessionId: string) => void;
     allowedToolNames?: ReadonlySet<string>;
     inputTokens?: number;
+    retryUpstream?: () => Promise<ReadableStream<Uint8Array>>;
+    computeRetryDelay?: (attempt: number) => BackoffOutcome;
+    maxRetryableStreamRetries?: number;
   },
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       let closed = false;
+      let currentUpstream = upstream;
+      let downstreamStarted = false;
+      let retryAttempt = 0;
 
       const emit = (event: string, data: unknown) => {
         if (closed || opts.signal?.aborted || controller.desiredSize === null) return false;
         opts.traffic?.writeJsonEvent("050-downstream-event", { event, data });
         controller.enqueue(encoder.encode(encodeSseEvent(event, data)));
+        downstreamStarted = true;
         return true;
       };
 
-      const framing = createCursorSseFramer({
-        messageId: opts.messageId,
-        model: opts.model,
-        emit,
-        mapUsage: (usage) => cursorUsageToAnthropic(usage, { inputTokens: opts.inputTokens }),
-        initialUsage: cursorUsageToAnthropic(undefined, { inputTokens: opts.inputTokens }),
-      });
-      const toolUseXml = new CursorToolUseXmlParser({ allowedToolNames: opts.allowedToolNames });
-
-      const emitRecoveredToolUse = (tool: RecoveredCursorToolUse) => {
-        opts.traffic?.writeJsonEvent("041-cursor-xml-tool-use", {
-          id: tool.id,
-          originalId: tool.originalId,
-          name: tool.name,
-          inputChars: JSON.stringify(tool.input).length,
-        });
-        framing.closeOpenBlocks();
-        framing.ensureStart();
-        const index = framing.nextContentBlockIndex();
-        emit("content_block_start", {
-          type: "content_block_start",
-          index,
-          content_block: {
-            type: "tool_use",
-            id: tool.id,
-            name: tool.name,
-            input: {},
-          },
-        });
-        emit("content_block_delta", {
-          type: "content_block_delta",
-          index,
-          delta: { type: "input_json_delta", partial_json: JSON.stringify(tool.input) },
-        });
-        emit("content_block_stop", { type: "content_block_stop", index });
-      };
-
-      const applyRecoveredEvent = (event: RecoveredCursorTextEvent) => {
-        if (event.type === "text") {
-          framing.emitTextDelta(event.text);
-          return;
-        }
-        emitRecoveredToolUse(event);
-      };
-
       try {
-        for await (const event of decodeCursorStream(upstream, opts.proto, { traffic: opts.traffic, log: opts.log })) {
-          opts.traffic?.writeJsonEvent("040-cursor-event", event);
-          if (opts.signal?.aborted) return;
-          switch (event.type) {
-            case "session":
-              opts.onSession?.(event.sessionId);
-              break;
-            case "thinking_delta":
-              framing.emitThinkingDelta(event.text);
-              break;
-            case "text_delta":
-              for (const recovered of toolUseXml.push(event.text)) applyRecoveredEvent(recovered);
-              break;
-            case "usage":
-              framing.recordUsage(event.usage);
-              break;
-            case "end":
-              break;
+        while (true) {
+          const framing = createCursorSseFramer({
+            messageId: opts.messageId,
+            model: opts.model,
+            emit,
+            mapUsage: (usage) => cursorUsageToAnthropic(usage, { inputTokens: opts.inputTokens }),
+            initialUsage: cursorUsageToAnthropic(undefined, { inputTokens: opts.inputTokens }),
+          });
+          const toolUseXml = new CursorToolUseXmlParser({ allowedToolNames: opts.allowedToolNames });
+
+          const emitRecoveredToolUse = (tool: RecoveredCursorToolUse) => {
+            opts.traffic?.writeJsonEvent("041-cursor-xml-tool-use", {
+              id: tool.id,
+              originalId: tool.originalId,
+              name: tool.name,
+              inputChars: JSON.stringify(tool.input).length,
+            });
+            framing.closeOpenBlocks();
+            framing.ensureStart();
+            const index = framing.nextContentBlockIndex();
+            emit("content_block_start", {
+              type: "content_block_start",
+              index,
+              content_block: {
+                type: "tool_use",
+                id: tool.id,
+                name: tool.name,
+                input: {},
+              },
+            });
+            emit("content_block_delta", {
+              type: "content_block_delta",
+              index,
+              delta: { type: "input_json_delta", partial_json: JSON.stringify(tool.input) },
+            });
+            emit("content_block_stop", { type: "content_block_stop", index });
+          };
+
+          const applyRecoveredEvent = (event: RecoveredCursorTextEvent) => {
+            if (event.type === "text") {
+              framing.emitTextDelta(event.text);
+              return;
+            }
+            emitRecoveredToolUse(event);
+          };
+
+          try {
+            for await (
+              const event of decodeCursorStream(currentUpstream, opts.proto, {
+                traffic: opts.traffic,
+                log: opts.log,
+              })
+            ) {
+              opts.traffic?.writeJsonEvent("040-cursor-event", event);
+              if (opts.signal?.aborted) return;
+              switch (event.type) {
+                case "session":
+                  opts.onSession?.(event.sessionId);
+                  break;
+                case "thinking_delta":
+                  framing.emitThinkingDelta(event.text);
+                  break;
+                case "text_delta":
+                  for (const recovered of toolUseXml.push(event.text)) applyRecoveredEvent(recovered);
+                  break;
+                case "usage":
+                  framing.recordUsage(event.usage);
+                  break;
+                case "end":
+                  break;
+              }
+            }
+            for (const recovered of toolUseXml.flush()) applyRecoveredEvent(recovered);
+            framing.emitFinalMessage(toolUseXml.sawToolUse ? "tool_use" : "end_turn");
+            return;
+          } catch (caught) {
+            let err: unknown = caught;
+            if (!downstreamStarted && opts.retryUpstream && isRetryableCursorNetworkResourceError(err)) {
+              const maxRetries = opts.maxRetryableStreamRetries ?? MAX_RATE_LIMIT_RETRIES;
+              if (retryAttempt < maxRetries && !opts.signal?.aborted) {
+                const retryDelay = opts.computeRetryDelay ?? computeBackoffDelay;
+                const { waitMs, exceedsBudget } = retryDelay(retryAttempt);
+                if (exceedsBudget) {
+                  opts.log.warn("cursor stream retry delay exceeds budget; giving up", {
+                    maxDelayMs: waitMs,
+                    err: String(err),
+                  });
+                } else {
+                  const nextAttempt = retryAttempt + 1;
+                  opts.log.warn("cursor stream error before downstream output, retrying", {
+                    attempt: nextAttempt,
+                    maxRetries,
+                    waitMs,
+                    err: String(err),
+                  });
+                  retryAttempt = nextAttempt;
+                  try {
+                    await sleep(waitMs, opts.signal);
+                    currentUpstream = await opts.retryUpstream();
+                    continue;
+                  } catch (retryErr) {
+                    err = retryErr;
+                  }
+                }
+              }
+            }
+            opts.log.warn("cursor stream error", { err: String(err) });
+            framing.emitError(err);
+            return;
           }
         }
-        for (const recovered of toolUseXml.flush()) applyRecoveredEvent(recovered);
-        framing.emitFinalMessage(toolUseXml.sawToolUse ? "tool_use" : "end_turn");
-      } catch (err) {
-        opts.log.warn("cursor stream error", { err: String(err) });
-        framing.emitError(err);
       } finally {
         closed = true;
         try {

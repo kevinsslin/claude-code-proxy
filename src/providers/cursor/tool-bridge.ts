@@ -1,6 +1,7 @@
 import { encodeSseEvent } from "../../sse.ts";
 import type { AnthropicRequest, AnthropicToolResultBlock } from "../../anthropic/schema.ts";
 import type { Logger } from "../../log.ts";
+import { computeBackoffDelay, MAX_RATE_LIMIT_RETRIES, sleep, type BackoffOutcome } from "../retry.ts";
 import type { RequestContext } from "../types.ts";
 import { countCursorTokens } from "./count-tokens.ts";
 import {
@@ -16,6 +17,7 @@ import {
   cursorWriteArgs,
   type CursorNativeToolResult,
   decodeCursorStream,
+  isRetryableCursorNetworkResourceError,
   type CursorAppendMessage,
   type CursorReadExec,
   type CursorShellStreamExec,
@@ -73,10 +75,14 @@ interface CursorBridgeState {
   waiters: Array<(tool: PendingNativeTool) => void>;
   log: Logger;
   traffic?: RequestContext["traffic"];
+  proto?: CursorProto;
   onSession?: (sessionId: string) => void;
   allowedToolNames?: ReadonlySet<string>;
   outputSeen: boolean;
+  downstreamStarted: boolean;
   outputIdleTimeoutMs: number;
+  retryUpstream?: () => Promise<ReadableStream<Uint8Array>>;
+  computeRetryDelay?: (attempt: number) => BackoffOutcome;
 }
 
 const bridgeStates = new Map<string, CursorBridgeState>();
@@ -151,7 +157,14 @@ export function createCursorShellToolBridge(opts: {
   readHandler: (exec: CursorReadExec, append: CursorAppendMessage) => Promise<void>;
   shellStreamHandler: (exec: CursorShellStreamExec, append: CursorAppendMessage) => Promise<void>;
   writeHandler: (exec: CursorWriteExec, append: CursorAppendMessage) => Promise<void>;
-  stream: (upstream: ReadableStream<Uint8Array>, signal?: AbortSignal) => ReadableStream<Uint8Array>;
+  stream: (
+    upstream: ReadableStream<Uint8Array>,
+    signal?: AbortSignal,
+    retryOpts?: {
+      retryUpstream?: () => Promise<ReadableStream<Uint8Array>>;
+      computeRetryDelay?: (attempt: number) => BackoffOutcome;
+    },
+  ) => ReadableStream<Uint8Array>;
 } {
   const state: CursorBridgeState = {
     sessionId: opts.sessionId,
@@ -162,9 +175,11 @@ export function createCursorShellToolBridge(opts: {
     waiters: [],
     log: opts.log,
     traffic: opts.traffic,
+    proto: opts.proto,
     onSession: opts.onSession,
     allowedToolNames: opts.allowedToolNames,
     outputSeen: false,
+    downstreamStarted: false,
     outputIdleTimeoutMs: opts.outputIdleTimeoutMs ?? CURSOR_OUTPUT_IDLE_TIMEOUT_MS,
   };
 
@@ -285,12 +300,17 @@ export function createCursorShellToolBridge(opts: {
         contentChars: writeResult.content.length,
       });
     },
-    stream(upstream, signal) {
+    stream(upstream, signal, retryOpts) {
       state.iterator = decodeCursorStream(upstream, opts.proto, {
         traffic: opts.traffic,
         log: opts.log,
         outputIdleTimeoutMs: 0,
       });
+      state.pendingNext = undefined;
+      state.outputSeen = false;
+      state.downstreamStarted = false;
+      state.retryUpstream = retryOpts?.retryUpstream;
+      state.computeRetryDelay = retryOpts?.computeRetryDelay;
       bridgeStates.set(opts.sessionId, state);
       return streamBridgeUntilToolOrEnd(state, signal);
     },
@@ -337,162 +357,198 @@ function streamBridgeUntilToolOrEnd(
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       let closed = false;
+      let retryAttempt = 0;
 
       const emit = (event: string, data: unknown) => {
         if (closed || signal?.aborted || controller.desiredSize === null) return false;
         state.traffic?.writeJsonEvent("050-downstream-event", { event, data });
         controller.enqueue(encoder.encode(encodeSseEvent(event, data)));
+        state.downstreamStarted = true;
         return true;
       };
 
-      const framing = createCursorSseFramer({
-        messageId: state.messageId,
-        model: state.model,
-        emit,
-        mapUsage: (usage) => cursorUsageToAnthropic(usage, { inputTokens: state.inputTokens }),
-        initialUsage: cursorUsageToAnthropic(undefined, { inputTokens: state.inputTokens }),
-      });
-      const toolUseXml = new CursorToolUseXmlParser({ allowedToolNames: state.allowedToolNames });
-
-      const emitToolUseAndPause = (tool: PendingNativeTool) => {
-        framing.emitToolPauseMessage((index) => {
-          const input = toolUseInput(tool);
-          emit("content_block_start", {
-            type: "content_block_start",
-            index,
-            content_block: {
-              type: "tool_use",
-              id: tool.toolUseId,
-              name: tool.kind,
-              input: {},
-            },
-          });
-          emit("content_block_delta", {
-            type: "content_block_delta",
-            index,
-            delta: { type: "input_json_delta", partial_json: input },
-          });
-          emit("content_block_stop", { type: "content_block_stop", index });
-        });
-      };
-
-      const emitRecoveredToolUse = (tool: RecoveredCursorToolUse) => {
-        state.traffic?.writeJsonEvent("041-cursor-xml-tool-use", {
-          id: tool.id,
-          originalId: tool.originalId,
-          name: tool.name,
-          inputChars: JSON.stringify(tool.input).length,
-        });
-        framing.closeOpenBlocks();
-        framing.ensureStart();
-        const index = framing.nextContentBlockIndex();
-        emit("content_block_start", {
-          type: "content_block_start",
-          index,
-          content_block: {
-            type: "tool_use",
-            id: tool.id,
-            name: tool.name,
-            input: {},
-          },
-        });
-        emit("content_block_delta", {
-          type: "content_block_delta",
-          index,
-          delta: { type: "input_json_delta", partial_json: JSON.stringify(tool.input) },
-        });
-        emit("content_block_stop", { type: "content_block_stop", index });
-      };
-
-      const applyRecoveredEvent = (event: RecoveredCursorTextEvent) => {
-        if (event.type === "text") {
-          framing.emitTextDelta(event.text);
-          return;
-        }
-        emitRecoveredToolUse(event);
-      };
-
-      const emitMessageEnd = () => {
-        framing.emitFinalMessage(toolUseXml.sawToolUse ? "tool_use" : "end_turn");
-      };
-
-      const emitStreamError = (err: unknown) => {
-        framing.emitError(err);
-      };
-
       try {
-        while (!signal?.aborted) {
-          const next = state.pendingNext ?? state.iterator.next();
-          state.pendingNext = next;
-          let idleTimer: ReturnType<typeof setTimeout> | undefined;
-          const race: Array<Promise<
-            | { type: "event"; value: IteratorResult<CursorStreamEvent> }
-            | { type: "tool"; tool: PendingNativeTool }
-            | { type: "idle" }
-          >> = [
-            next.then((value) => ({ type: "event" as const, value })),
-            waitForPendingTool(state).then((tool) => ({ type: "tool" as const, tool })),
-          ];
-          if (state.outputSeen && state.outputIdleTimeoutMs > 0) {
-            race.push(new Promise<{ type: "idle" }>((resolve) => {
-              idleTimer = setTimeout(() => resolve({ type: "idle" }), state.outputIdleTimeoutMs);
-            }));
-          }
-          const result = await Promise.race(race).finally(() => {
-            if (idleTimer) clearTimeout(idleTimer);
+        while (true) {
+          const framing = createCursorSseFramer({
+            messageId: state.messageId,
+            model: state.model,
+            emit,
+            mapUsage: (usage) => cursorUsageToAnthropic(usage, { inputTokens: state.inputTokens }),
+            initialUsage: cursorUsageToAnthropic(undefined, { inputTokens: state.inputTokens }),
           });
+          const toolUseXml = new CursorToolUseXmlParser({ allowedToolNames: state.allowedToolNames });
 
-          if (result.type === "tool") {
-            emitToolUseAndPause(result.tool);
+          const emitToolUseAndPause = (tool: PendingNativeTool) => {
+            framing.emitToolPauseMessage((index) => {
+              const input = toolUseInput(tool);
+              emit("content_block_start", {
+                type: "content_block_start",
+                index,
+                content_block: {
+                  type: "tool_use",
+                  id: tool.toolUseId,
+                  name: tool.kind,
+                  input: {},
+                },
+              });
+              emit("content_block_delta", {
+                type: "content_block_delta",
+                index,
+                delta: { type: "input_json_delta", partial_json: input },
+              });
+              emit("content_block_stop", { type: "content_block_stop", index });
+            });
+          };
+
+          const emitRecoveredToolUse = (tool: RecoveredCursorToolUse) => {
+            state.traffic?.writeJsonEvent("041-cursor-xml-tool-use", {
+              id: tool.id,
+              originalId: tool.originalId,
+              name: tool.name,
+              inputChars: JSON.stringify(tool.input).length,
+            });
+            framing.closeOpenBlocks();
+            framing.ensureStart();
+            const index = framing.nextContentBlockIndex();
+            emit("content_block_start", {
+              type: "content_block_start",
+              index,
+              content_block: {
+                type: "tool_use",
+                id: tool.id,
+                name: tool.name,
+                input: {},
+              },
+            });
+            emit("content_block_delta", {
+              type: "content_block_delta",
+              index,
+              delta: { type: "input_json_delta", partial_json: JSON.stringify(tool.input) },
+            });
+            emit("content_block_stop", { type: "content_block_stop", index });
+          };
+
+          const applyRecoveredEvent = (event: RecoveredCursorTextEvent) => {
+            if (event.type === "text") {
+              framing.emitTextDelta(event.text);
+              return;
+            }
+            emitRecoveredToolUse(event);
+          };
+
+          try {
+            while (!signal?.aborted) {
+              const next = state.pendingNext ?? state.iterator.next();
+              state.pendingNext = next;
+              let idleTimer: ReturnType<typeof setTimeout> | undefined;
+              const race: Array<Promise<
+                | { type: "event"; value: IteratorResult<CursorStreamEvent> }
+                | { type: "tool"; tool: PendingNativeTool }
+                | { type: "idle" }
+              >> = [
+                next.then((value) => ({ type: "event" as const, value })),
+                waitForPendingTool(state).then((tool) => ({ type: "tool" as const, tool })),
+              ];
+              if (state.outputSeen && state.outputIdleTimeoutMs > 0) {
+                race.push(new Promise<{ type: "idle" }>((resolve) => {
+                  idleTimer = setTimeout(() => resolve({ type: "idle" }), state.outputIdleTimeoutMs);
+                }));
+              }
+              const result = await Promise.race(race).finally(() => {
+                if (idleTimer) clearTimeout(idleTimer);
+              });
+
+              if (result.type === "tool") {
+                emitToolUseAndPause(result.tool);
+                return;
+              }
+
+              if (result.type === "idle") {
+                state.log.warn("cursor bridge stream idle after output", {
+                  idleMs: state.outputIdleTimeoutMs,
+                });
+                state.traffic?.writeJsonEvent("040-cursor-event", {
+                  type: "end",
+                  reason: "output_idle_timeout",
+                  idleMs: state.outputIdleTimeoutMs,
+                });
+                state.pendingNext = undefined;
+                await state.iterator.return?.(undefined);
+                break;
+              }
+
+              state.pendingNext = undefined;
+              if (result.value.done) break;
+              const event = result.value.value;
+              state.traffic?.writeJsonEvent("040-cursor-event", event);
+              if (event.type === "thinking_delta" || event.type === "text_delta" || event.type === "usage") {
+                state.outputSeen = true;
+              }
+              switch (event.type) {
+                case "session":
+                  state.onSession?.(event.sessionId);
+                  break;
+                case "thinking_delta":
+                  framing.emitThinkingDelta(event.text);
+                  break;
+                case "text_delta":
+                  for (const recovered of toolUseXml.push(event.text)) applyRecoveredEvent(recovered);
+                  break;
+                case "usage":
+                  framing.recordUsage(event.usage);
+                  break;
+                case "end":
+                  break;
+              }
+            }
+            for (const recovered of toolUseXml.flush()) applyRecoveredEvent(recovered);
+
+            framing.emitFinalMessage(toolUseXml.sawToolUse ? "tool_use" : "end_turn");
+            bridgeStates.delete(state.sessionId);
+            return;
+          } catch (caught) {
+            let err: unknown = caught;
+            if (!state.downstreamStarted && state.retryUpstream && isRetryableCursorNetworkResourceError(err)) {
+              if (retryAttempt < MAX_RATE_LIMIT_RETRIES && !signal?.aborted) {
+                const retryDelay = state.computeRetryDelay ?? computeBackoffDelay;
+                const { waitMs, exceedsBudget } = retryDelay(retryAttempt);
+                if (exceedsBudget) {
+                  state.log.warn("cursor bridge retry delay exceeds budget; giving up", {
+                    maxDelayMs: waitMs,
+                    err: String(err),
+                  });
+                } else {
+                  const nextAttempt = retryAttempt + 1;
+                  state.log.warn("cursor bridge stream error before downstream output, retrying", {
+                    attempt: nextAttempt,
+                    maxRetries: MAX_RATE_LIMIT_RETRIES,
+                    waitMs,
+                    err: String(err),
+                  });
+                  retryAttempt = nextAttempt;
+                  try {
+                    await sleep(waitMs, signal);
+                    const retryUpstream = await state.retryUpstream();
+                    state.iterator = decodeCursorStream(retryUpstream, state.proto, {
+                      traffic: state.traffic,
+                      log: state.log,
+                      outputIdleTimeoutMs: 0,
+                    });
+                    state.pendingNext = undefined;
+                    state.outputSeen = false;
+                    continue;
+                  } catch (retryErr) {
+                    err = retryErr;
+                  }
+                }
+              }
+            }
+            state.log.warn("cursor bridge stream error", { err: String(err) });
+            framing.emitError(err);
+            bridgeStates.delete(state.sessionId);
             return;
           }
-
-          if (result.type === "idle") {
-            state.log.warn("cursor bridge stream idle after output", {
-              idleMs: state.outputIdleTimeoutMs,
-            });
-            state.traffic?.writeJsonEvent("040-cursor-event", {
-              type: "end",
-              reason: "output_idle_timeout",
-              idleMs: state.outputIdleTimeoutMs,
-            });
-            state.pendingNext = undefined;
-            await state.iterator.return?.(undefined);
-            break;
-          }
-
-          state.pendingNext = undefined;
-          if (result.value.done) break;
-          const event = result.value.value;
-          state.traffic?.writeJsonEvent("040-cursor-event", event);
-          if (event.type === "thinking_delta" || event.type === "text_delta" || event.type === "usage") {
-            state.outputSeen = true;
-          }
-          switch (event.type) {
-            case "session":
-              state.onSession?.(event.sessionId);
-              break;
-            case "thinking_delta":
-              framing.emitThinkingDelta(event.text);
-              break;
-            case "text_delta":
-              for (const recovered of toolUseXml.push(event.text)) applyRecoveredEvent(recovered);
-              break;
-            case "usage":
-              framing.recordUsage(event.usage);
-              break;
-            case "end":
-              break;
-          }
         }
-        for (const recovered of toolUseXml.flush()) applyRecoveredEvent(recovered);
-
-        emitMessageEnd();
-        bridgeStates.delete(state.sessionId);
-      } catch (err) {
-        state.log.warn("cursor bridge stream error", { err: String(err) });
-        emitStreamError(err);
-        bridgeStates.delete(state.sessionId);
       } finally {
         closed = true;
         try {

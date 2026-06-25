@@ -126,6 +126,12 @@ export class CursorError extends Error {
   }
 }
 
+export function isRetryableCursorNetworkResourceError(err: unknown): boolean {
+  if (!(err instanceof CursorError) || err.status !== 429) return false;
+  const text = `${err.message} ${err.detail ?? ""}`.toLowerCase();
+  return text.includes("resource_exhausted") && text.includes("network error");
+}
+
 const HEARTBEAT_INTERVAL_MS = 5_000;
 export const CURSOR_OUTPUT_IDLE_TIMEOUT_MS = 30_000;
 

@@ -140,3 +140,15 @@ export function resourceExhaustedFrame(): Uint8Array {
     2,
   );
 }
+
+export function resourceExhaustedNetworkFrame(): Uint8Array {
+  return encodeConnectFrame(
+    jsonBytes({
+      error: {
+        code: "resource_exhausted",
+        message: "Network Error",
+      },
+    }),
+    2,
+  );
+}

@@ -2,9 +2,12 @@ import type { AnthropicRequest } from "../../anthropic/schema.ts";
 import { wantsDownstreamStream } from "../../anthropic/stream.ts";
 import { jsonError, jsonResponse, sseResponse } from "../../anthropic/response.ts";
 import { logVerbose } from "../../config.ts";
+import type { Logger } from "../../log.ts";
+import { computeBackoffDelay, MAX_RATE_LIMIT_RETRIES, sleep, type BackoffOutcome } from "../retry.ts";
 import type { Provider, RequestContext } from "../types.ts";
 import {
   CursorError,
+  isRetryableCursorNetworkResourceError,
   runCursorAgent,
   type CursorRunOptions,
 } from "./client.ts";
@@ -47,6 +50,7 @@ export interface CursorProviderDeps {
   runAgent: (opts: CursorRunOptions) => Promise<ReadableStream<Uint8Array>>;
   proto?: CursorProto;
   bridgeOutputIdleTimeoutMs?: number;
+  computeRetryDelay?: (attempt: number) => BackoffOutcome;
 }
 
 const defaultDeps: CursorProviderDeps = {
@@ -119,32 +123,41 @@ async function handleMessages(
   const bridgeWrite = canBridgeCursorWriteTool(body);
   const denyUnadvertisedNativeTools = Boolean(wantStream && ctx.sessionId);
 
+  const runOptions: CursorRunOptions = {
+    prompt,
+    mode: selection.mode,
+    conversationId,
+    model: selection.requestedModel,
+    selectedImages,
+    auth,
+    ctx,
+    readHandler: bridgeRead
+      ? nativeToolBridge?.readHandler
+      : denyUnadvertisedNativeTools
+      ? denyCursorReadTool
+      : undefined,
+    shellStreamHandler: bridgeBash
+      ? nativeToolBridge?.shellStreamHandler
+      : denyUnadvertisedNativeTools
+      ? denyCursorBashTool
+      : undefined,
+    writeHandler: bridgeWrite
+      ? nativeToolBridge?.writeHandler
+      : denyUnadvertisedNativeTools
+      ? denyCursorWriteTool
+      : undefined,
+  };
+  const runAgent = () => deps.runAgent(runOptions);
+  const retryRunAgent = () =>
+    retryCursorNetworkResourceError(runAgent, {
+      log,
+      signal: ctx.signal,
+      computeRetryDelay: deps.computeRetryDelay,
+    });
+
   let upstream: ReadableStream<Uint8Array>;
   try {
-    upstream = await deps.runAgent({
-      prompt,
-      mode: selection.mode,
-      conversationId,
-      model: selection.requestedModel,
-      selectedImages,
-      auth,
-      ctx,
-      readHandler: bridgeRead
-        ? nativeToolBridge?.readHandler
-        : denyUnadvertisedNativeTools
-        ? denyCursorReadTool
-        : undefined,
-      shellStreamHandler: bridgeBash
-        ? nativeToolBridge?.shellStreamHandler
-        : denyUnadvertisedNativeTools
-        ? denyCursorBashTool
-        : undefined,
-      writeHandler: bridgeWrite
-        ? nativeToolBridge?.writeHandler
-        : denyUnadvertisedNativeTools
-        ? denyCursorWriteTool
-        : undefined,
-    });
+    upstream = await retryRunAgent();
   } catch (err) {
     if (err instanceof CursorError) {
       log.warn("cursor upstream error", {
@@ -159,7 +172,10 @@ async function handleMessages(
   }
 
   if (wantStream) {
-    const stream = nativeToolBridge?.stream(upstream, ctx.signal) ?? translateCursorStream(upstream, {
+    const stream = nativeToolBridge?.stream(upstream, ctx.signal, {
+      retryUpstream: retryRunAgent,
+      computeRetryDelay: deps.computeRetryDelay,
+    }) ?? translateCursorStream(upstream, {
       messageId,
       model: body.model,
       log: ctx.childLogger("cursor.stream"),
@@ -169,21 +185,36 @@ async function handleMessages(
       onSession,
       allowedToolNames,
       inputTokens,
+      retryUpstream: retryRunAgent,
+      computeRetryDelay: deps.computeRetryDelay,
     });
     return sseResponse(stream);
   }
 
   try {
-    const result = await accumulateCursorResponse(upstream, {
-      messageId,
-      model: body.model,
-      log: ctx.childLogger("cursor.accumulate"),
-      traffic: ctx.traffic,
-      proto: deps.proto,
-      onSession,
-      allowedToolNames,
-      inputTokens,
-    });
+    const accumulateLog = ctx.childLogger("cursor.accumulate");
+    let nextUpstream: ReadableStream<Uint8Array> | undefined = upstream;
+    const result = await retryCursorNetworkResourceError(
+      async () => {
+        const currentUpstream = nextUpstream ?? await runAgent();
+        nextUpstream = undefined;
+        return accumulateCursorResponse(currentUpstream, {
+          messageId,
+          model: body.model,
+          log: accumulateLog,
+          traffic: ctx.traffic,
+          proto: deps.proto,
+          onSession,
+          allowedToolNames,
+          inputTokens,
+        });
+      },
+      {
+        log: accumulateLog,
+        signal: ctx.signal,
+        computeRetryDelay: deps.computeRetryDelay,
+      },
+    );
     return jsonResponse(result.response);
   } catch (err) {
     log.warn("cursor accumulate error", { err: String(err) });
@@ -206,3 +237,38 @@ export function createCursorProvider(deps: CursorProviderDeps = defaultDeps): Pr
 }
 
 export const cursorProvider: Provider = createCursorProvider();
+
+async function retryCursorNetworkResourceError<T>(
+  run: () => Promise<T>,
+  opts: {
+    log: Logger;
+    signal?: AbortSignal;
+    computeRetryDelay?: (attempt: number) => BackoffOutcome;
+  },
+): Promise<T> {
+  const retryDelay = opts.computeRetryDelay ?? computeBackoffDelay;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await run();
+    } catch (err) {
+      if (!isRetryableCursorNetworkResourceError(err) || attempt >= MAX_RATE_LIMIT_RETRIES) {
+        throw err;
+      }
+      const { waitMs, exceedsBudget } = retryDelay(attempt);
+      if (exceedsBudget) {
+        opts.log.warn("cursor resource_exhausted network retry delay exceeds budget; giving up", {
+          maxDelayMs: waitMs,
+          err: String(err),
+        });
+        throw err;
+      }
+      opts.log.warn("cursor resource_exhausted network error, retrying", {
+        attempt: attempt + 1,
+        maxRetries: MAX_RATE_LIMIT_RETRIES,
+        waitMs,
+        err: String(err),
+      });
+      await sleep(waitMs, opts.signal);
+    }
+  }
+}

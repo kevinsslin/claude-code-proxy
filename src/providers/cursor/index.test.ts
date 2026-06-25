@@ -10,6 +10,7 @@ import {
   jsonBytes,
   jwt,
   resourceExhaustedFrame,
+  resourceExhaustedNetworkFrame,
   streamFromChunks,
 } from "./cursor-test-helpers.ts";
 import { mkdir, mkdtemp, stat, writeFile } from "node:fs/promises";
@@ -177,6 +178,35 @@ describe("Cursor provider messages", () => {
     expect(body.content).toEqual([{ type: "text", text: "hello" }]);
   });
 
+  it("retries Cursor resource_exhausted network errors for non-streaming requests", async () => {
+    let attempts = 0;
+    const provider = createCursorTestProvider(
+      async () => {
+        attempts++;
+        if (attempts === 1) return streamFromChunks([resourceExhaustedNetworkFrame()]);
+        return streamFromChunks([
+          frame({ interactionUpdate: { textDelta: { text: "recovered" } } }),
+          frame({ interactionUpdate: { turnEnded: { inputTokens: "4", outputTokens: "1" } } }),
+          encodeConnectFrame(jsonBytes({}), 2),
+        ]);
+      },
+      { computeRetryDelay: () => ({ waitMs: 0, exceedsBudget: false }) },
+    );
+
+    const response = await provider.handleMessages(
+      {
+        model: "cursor",
+        messages: [{ role: "user", content: "hello" }],
+      },
+      fakeCursorCtx({ sessionId: "session" }),
+    );
+    const body = (await response.json()) as { content: Array<{ type: string; text?: string }> };
+
+    expect(attempts).toBe(2);
+    expect(response.status).toBe(200);
+    expect(body.content).toEqual([{ type: "text", text: "recovered" }]);
+  });
+
   it("returns valid Anthropic SSE for streaming requests", async () => {
     const provider = createCursorTestProvider(async () => {
       return streamFromChunks([
@@ -199,6 +229,37 @@ describe("Cursor provider messages", () => {
     expectSseHeaders(response);
     expect(events.map((event) => event.event)).toContain("message_start");
     expect(getTextDeltaEvent(events)?.data.delta.text).toBe("streamed");
+    expectMessageStop(events);
+  });
+
+  it("retries Cursor resource_exhausted network errors for bridged streaming requests", async () => {
+    let attempts = 0;
+    const provider = createCursorTestProvider(
+      async () => {
+        attempts++;
+        if (attempts === 1) return streamFromChunks([resourceExhaustedNetworkFrame()]);
+        return streamFromChunks([
+          frame({ interactionUpdate: { textDelta: { text: "bridge recovered" } } }),
+          frame({ interactionUpdate: { turnEnded: { inputTokens: "4", outputTokens: "1" } } }),
+        ]);
+      },
+      { computeRetryDelay: () => ({ waitMs: 0, exceedsBudget: false }) },
+    );
+
+    const response = await provider.handleMessages(
+      {
+        model: "cursor",
+        stream: true,
+        tools: [{ name: "Read", input_schema: { type: "object" } }],
+        messages: [{ role: "user", content: "hello" }],
+      },
+      fakeCursorCtx({ sessionId: "session" }),
+    );
+    const events = await collectCursorSse(response);
+
+    expect(attempts).toBe(2);
+    expect(events.some((event) => event.event === "error")).toBe(false);
+    expect(getTextDeltaEvent(events)?.data.delta.text).toBe("bridge recovered");
     expectMessageStop(events);
   });
 

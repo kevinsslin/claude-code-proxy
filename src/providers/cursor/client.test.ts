@@ -2,7 +2,13 @@ import { describe, expect, it } from "bun:test";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { decodeCursorStream, encodeConnectFrame, runCursorAgent } from "./client.ts";
+import {
+  CursorError,
+  decodeCursorStream,
+  encodeConnectFrame,
+  isRetryableCursorNetworkResourceError,
+  runCursorAgent,
+} from "./client.ts";
 import {
   decodeFrameJson,
   fakeProtoMerged as fakeProto,
@@ -90,6 +96,24 @@ function assertStreamCloseMessage(messages: CursorClientMessage[], index: number
     },
   });
 }
+
+describe("CursorError retry classification", () => {
+  it("retries resource_exhausted network errors", () => {
+    expect(
+      isRetryableCursorNetworkResourceError(
+        new CursorError(429, "Cursor Run failed: resource_exhausted: Network Error"),
+      ),
+    ).toBe(true);
+  });
+
+  it("does not retry quota resource_exhausted errors", () => {
+    expect(
+      isRetryableCursorNetworkResourceError(
+        new CursorError(429, "Cursor Run failed: resource_exhausted: You've hit your free requests limit."),
+      ),
+    ).toBe(false);
+  });
+});
 
 async function runCursorAgentWithFrames(
   serverFrames: Uint8Array[],

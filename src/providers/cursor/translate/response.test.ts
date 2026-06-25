@@ -7,6 +7,7 @@ import {
   fakeProto,
   frame,
   jsonBytes,
+  resourceExhaustedNetworkFrame,
   streamFromChunks,
 } from "../cursor-test-helpers.ts";
 import {
@@ -365,5 +366,32 @@ describe("Cursor response translation", () => {
     expect(events.map((event) => event.event)).toEqual(["message_start", "ping", "error"]);
     expect(events[2]?.data.error.message).toContain("resource_exhausted");
     expect(events[2]?.data.error.message).toContain("free requests limit");
+  });
+
+  it("retries Cursor resource_exhausted network errors before downstream output starts", async () => {
+    let retryCalls = 0;
+    const downstream = translateCursorStream(
+      streamFromChunks([resourceExhaustedNetworkFrame()]),
+      {
+        messageId: "msg_retry",
+        model: "cursor-plan",
+        log: createLogger("cursor.response.test"),
+        proto: fakeProto,
+        retryUpstream: async () => {
+          retryCalls++;
+          return streamFromChunks([
+            frame({ interactionUpdate: { textDelta: { text: "recovered" } } }),
+            frame({ interactionUpdate: { turnEnded: { inputTokens: "4", outputTokens: "1" } } }),
+          ]);
+        },
+        computeRetryDelay: () => ({ waitMs: 0, exceedsBudget: false }),
+      },
+    );
+    const events = await collectCursorSse(downstream);
+
+    expect(retryCalls).toBe(1);
+    expect(events.map((event) => event.event)).toContain("message_stop");
+    expect(events.some((event) => event.event === "error")).toBe(false);
+    expect(events.some((event) => event.data.delta?.text === "recovered")).toBe(true);
   });
 });
