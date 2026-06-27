@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Add end-to-end smoke coverage for Kimi chat-completions, Codex HTTP
+  Responses, and Codex WebSocket Responses through in-process mock upstreams
+  with isolated auth.
+- Document the smoke procedure, known transport differences, traffic-capture
+  shape, and current Rust support scope in `docs/smoke-cutover.md`.
+
 ## v0.0.22 (2026-06-24)
 
 - Codex requests now retry more transient stream and overload failures, making temporary upstream errors less likely to interrupt Claude Code sessions. ([#15](https://github.com/raine/claude-code-proxy/issues/15))

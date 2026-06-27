@@ -87,13 +87,26 @@ impl Provider for KimiProvider {
             }
         };
 
-        // For count_tokens endpoint, we use local token counting
-        // For messages endpoint, we send to upstream
-        let client = client::KimiHttpClient::new();
-        let upstream = match client.post_kimi(&translated) {
-            Ok(r) => r,
-            Err(e) => {
+        // KimiHttpClient uses a blocking client whose lifecycle belongs on a
+        // blocking thread.
+        let upstream = match tokio::task::spawn_blocking(move || {
+            let client = client::KimiHttpClient::new();
+            let result = client.post_kimi(&translated);
+            drop(client);
+            result
+        })
+        .await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
                 return map_kimi_error_to_response(&e);
+            }
+            Err(join_err) => {
+                return json_error(
+                    StatusCode::BAD_GATEWAY,
+                    "api_error",
+                    format!("Blocking task join error: {join_err}"),
+                );
             }
         };
 

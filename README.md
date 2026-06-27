@@ -747,17 +747,24 @@ sticky sessions or shared state before enabling continuation.
 ## Development
 
 ```sh
-bunx tsc --noEmit                          # typecheck
-bun src/cli.ts serve                       # run locally (routes all providers)
-tail -f ~/.local/state/claude-code-proxy/proxy.log | jq .
+cargo run -- serve                         # run locally (routes all providers)
+cargo test --all                           # run tests
+cargo fmt --all --check                    # check formatting
+cargo clippy --all-targets -- -D warnings  # lint
+just check                                 # run the full project check
 ```
+
+### Smoke coverage
+
+See [docs/smoke-cutover.md](docs/smoke-cutover.md) for automated smoke tests,
+optional real-auth validation steps, known transport differences, and the
+current Rust support scope.
 
 **Install a compiled dev build globally:** compile the current working tree to a
 binary and place it on your `PATH` without linking:
 
 ```sh
-mkdir -p ~/.local/bin
-bun build ./src/cli.ts --compile --outfile ~/.local/bin/claude-code-proxy
+cargo install --path . --locked
 ```
 
 ## Related projects
