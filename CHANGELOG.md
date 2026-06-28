@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## v0.1.0 (2026-06-28)
+
+- Ships the native Rust implementation as the release binary and removes the
+  copied TypeScript reference source from the branch.
+- Adds the default monitor TUI for `serve`, with session, active request,
+  recent request, and events panels.
+- Records failed proxy responses under the state directory `errors/` folder and
+  links them from `request_failed` log events for copyable diagnostics.
+- Adds stable session ordering, visible token throughput, and clearer request
+  error details in the monitor.
 - Add end-to-end smoke coverage for Kimi chat-completions, Codex HTTP
   Responses, and Codex WebSocket Responses through in-process mock upstreams
   with isolated auth.
