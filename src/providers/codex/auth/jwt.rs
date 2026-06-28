@@ -63,6 +63,19 @@ fn extract_account_id_from_claims(claims: &IdTokenClaims) -> Option<String> {
         .or_else(|| claims.organizations.as_ref()?.first()?.id.clone().into())
 }
 
+pub fn validate_token_response(tokens: &TokenResponse) -> anyhow::Result<()> {
+    if tokens.access_token.trim().is_empty() {
+        anyhow::bail!("token response missing access token");
+    }
+    if tokens.refresh_token.trim().is_empty() {
+        anyhow::bail!("token response missing refresh token");
+    }
+    if matches!(tokens.expires_in, Some(0)) {
+        anyhow::bail!("token response has invalid expiration");
+    }
+    Ok(())
+}
+
 pub fn extract_account_id(tokens: &TokenResponse) -> Option<String> {
     if let Some(ref id_token) = tokens.id_token
         && let Some(claims) = parse_jwt_claims(id_token)
@@ -113,5 +126,78 @@ mod tests {
             expires_in: None,
         };
         assert_eq!(extract_account_id(&token), None);
+    }
+
+    #[test]
+    fn validate_token_response_rejects_empty_access_token() {
+        let token = TokenResponse {
+            access_token: "".into(),
+            refresh_token: "r".into(),
+            expires_in: Some(3600),
+            id_token: None,
+        };
+        assert!(validate_token_response(&token).is_err());
+        assert!(
+            validate_token_response(&token)
+                .unwrap_err()
+                .to_string()
+                .contains("missing access token")
+        );
+    }
+
+    #[test]
+    fn validate_token_response_rejects_empty_refresh_token() {
+        let token = TokenResponse {
+            access_token: "a".into(),
+            refresh_token: "".into(),
+            expires_in: Some(3600),
+            id_token: None,
+        };
+        assert!(validate_token_response(&token).is_err());
+        assert!(
+            validate_token_response(&token)
+                .unwrap_err()
+                .to_string()
+                .contains("missing refresh token")
+        );
+    }
+
+    #[test]
+    fn validate_token_response_rejects_zero_expires_in() {
+        let token = TokenResponse {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            expires_in: Some(0),
+            id_token: None,
+        };
+        assert!(validate_token_response(&token).is_err());
+        assert!(
+            validate_token_response(&token)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid expiration")
+        );
+    }
+
+    #[test]
+    fn validate_token_response_accepts_valid() {
+        let token = TokenResponse {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            expires_in: Some(3600),
+            id_token: None,
+        };
+        assert!(validate_token_response(&token).is_ok());
+    }
+
+    #[test]
+    fn validate_token_response_accepts_no_expires_in() {
+        let token = TokenResponse {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            expires_in: None,
+            id_token: None,
+        };
+        assert!(validate_token_response(&token).is_ok());
     }
 }

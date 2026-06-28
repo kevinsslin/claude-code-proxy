@@ -18,6 +18,9 @@ use crate::config;
 use crate::provider::{CliHandlers, Provider, RequestContext};
 use crate::registry;
 
+use self::auth::browser_login::run_browser_login;
+use self::auth::device::DeviceAuthClient;
+use self::auth::manager::CodexAuthManager;
 use self::auth::token_store::file_store;
 use self::client::CodexHttpClient;
 use self::continuation::{clear_continuation, continuation_candidate};
@@ -232,11 +235,29 @@ pub(crate) struct CodexCli;
 
 impl CliHandlers for CodexCli {
     fn login(&self) -> Result<(), anyhow::Error> {
-        anyhow::bail!("codex: browser login not yet implemented; use device login instead");
+        let tokens = run_browser_login()?;
+        let store = file_store();
+        let manager = CodexAuthManager::new(store);
+        let saved = manager.persist_initial_tokens(&tokens)?;
+        println!("Auth saved in {}", manager.store.auth_path());
+        if let Some(ref aid) = saved.account_id {
+            println!("Account: {aid}");
+        }
+        println!("Authentication complete");
+        Ok(())
     }
 
     fn device(&self) -> Result<(), anyhow::Error> {
-        anyhow::bail!("codex: device login not yet implemented");
+        let tokens = DeviceAuthClient::new().run()?;
+        let store = file_store();
+        let manager = CodexAuthManager::new(store);
+        let saved = manager.persist_initial_tokens(&tokens)?;
+        println!("Auth saved in {}", manager.store.auth_path());
+        if let Some(ref aid) = saved.account_id {
+            println!("Account: {aid}");
+        }
+        println!("Authentication complete");
+        Ok(())
     }
 
     fn status(&self) -> Result<(), anyhow::Error> {

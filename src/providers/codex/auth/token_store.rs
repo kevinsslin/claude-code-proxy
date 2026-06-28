@@ -13,7 +13,12 @@ pub struct StoredAuth {
     pub access: String,
     pub refresh: String,
     pub expires: u64,
-    #[serde(default, alias = "accountId", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "accountId",
+        alias = "account_id",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub account_id: Option<String>,
 }
 
@@ -175,6 +180,19 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(auth.account_id.as_deref(), Some("acct"));
+    }
+
+    #[test]
+    fn stored_auth_writes_account_id_key() {
+        let auth = StoredAuth {
+            access: "a".into(),
+            refresh: "r".into(),
+            expires: 4102444800000,
+            account_id: Some("acct_1".into()),
+        };
+        let value = serde_json::to_value(auth).unwrap();
+        assert_eq!(value["accountId"], "acct_1");
+        assert!(value.get("account_id").is_none());
     }
 
     #[test]

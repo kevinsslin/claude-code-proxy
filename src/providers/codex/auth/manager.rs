@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::constants::{CLIENT_ID, ISSUER, REFRESH_MARGIN_MS};
-use super::jwt::{TokenResponse, extract_account_id};
+use super::jwt::{TokenResponse, extract_account_id, validate_token_response};
 use super::token_store::{CodexTokenStore, StoredAuth};
 use crate::auth::AuthStorage;
 
@@ -108,6 +108,7 @@ impl<S: AuthStorage<StoredAuth>> CodexAuthManager<S> {
         let tokens: TokenResponse = resp
             .json()
             .map_err(|e| anyhow::anyhow!("failed to parse token response: {e}"))?;
+        validate_token_response(&tokens)?;
         let account_id = extract_account_id(&tokens).or_else(|| current.account_id.clone());
         let expires = Self::now_ms() + (tokens.expires_in.unwrap_or(3600) * 1000);
         let next = StoredAuth {
@@ -128,6 +129,7 @@ impl<S: AuthStorage<StoredAuth>> CodexAuthManager<S> {
         &self,
         tokens: &TokenResponse,
     ) -> Result<StoredAuth, anyhow::Error> {
+        validate_token_response(tokens)?;
         let account_id = extract_account_id(tokens);
         let expires = Self::now_ms() + (tokens.expires_in.unwrap_or(3600) * 1000);
         let auth = StoredAuth {
