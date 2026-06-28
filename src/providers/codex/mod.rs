@@ -95,6 +95,7 @@ impl Provider for CodexProvider {
             TranslateOptions {
                 session_id: ctx.session_id.clone(),
                 service_tier: resolved.service_tier.clone(),
+                model: resolved.model.clone(),
             },
         ) {
             Ok(t) => t,
@@ -224,6 +225,7 @@ impl Provider for CodexProvider {
             TranslateOptions {
                 session_id: None,
                 service_tier: resolved.service_tier.clone(),
+                model: resolved.model.clone(),
             },
         ) {
             Ok(t) => t,

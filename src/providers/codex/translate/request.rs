@@ -178,6 +178,7 @@ pub struct ResponsesWebSearchFilters {
 pub struct TranslateOptions {
     pub session_id: Option<String>,
     pub service_tier: Option<ServiceTier>,
+    pub model: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -264,7 +265,6 @@ pub fn translate_request(
     req: &MessagesRequest,
     opts: TranslateOptions,
 ) -> Result<ResponsesRequest, anyhow::Error> {
-    let model = req.model.as_deref().unwrap_or("gpt-5.5");
     let instructions = flatten_system_text(req.extra.get("system"));
     let input = build_input(req);
     let tools = read_tools(req)?;
@@ -280,7 +280,7 @@ pub fn translate_request(
     }
 
     let mut out = ResponsesRequest {
-        model: model.to_string(),
+        model: opts.model,
         instructions,
         input,
         store: false,
@@ -616,6 +616,14 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn opts() -> TranslateOptions {
+        TranslateOptions {
+            session_id: None,
+            service_tier: None,
+            model: "gpt-5.5".to_string(),
+        }
+    }
+
     #[test]
     fn translate_web_search_tool_to_codex_tool() {
         let req: MessagesRequest = serde_json::from_value(json!({
@@ -634,6 +642,7 @@ mod tests {
             TranslateOptions {
                 session_id: Some("s".into()),
                 service_tier: None,
+                model: "gpt-5.5".to_string(),
             },
         )
         .unwrap();
@@ -651,14 +660,7 @@ mod tests {
             "messages": [{"role":"user", "content":"hello"}]
         }))
         .unwrap();
-        let out = translate_request(
-            &req,
-            TranslateOptions {
-                session_id: None,
-                service_tier: None,
-            },
-        )
-        .unwrap();
+        let out = translate_request(&req, opts()).unwrap();
         assert!(out.reasoning.is_none());
         assert!(out.include.is_none());
     }
@@ -671,14 +673,7 @@ mod tests {
             "output_config": {"effort": "medium"}
         }))
         .unwrap();
-        let out = translate_request(
-            &req,
-            TranslateOptions {
-                session_id: None,
-                service_tier: None,
-            },
-        )
-        .unwrap();
+        let out = translate_request(&req, opts()).unwrap();
         assert!(out.reasoning.is_some());
         assert_eq!(
             out.include,
@@ -694,14 +689,7 @@ mod tests {
             "output_config": {"effort": "max"}
         }))
         .unwrap();
-        let out = translate_request(
-            &req,
-            TranslateOptions {
-                session_id: None,
-                service_tier: None,
-            },
-        )
-        .unwrap();
+        let out = translate_request(&req, opts()).unwrap();
         assert!(matches!(out.reasoning.unwrap().effort, Some(Effort::Xhigh)));
     }
 
@@ -715,14 +703,7 @@ mod tests {
             ]}]
         }))
         .unwrap();
-        let out = translate_request(
-            &req,
-            TranslateOptions {
-                session_id: None,
-                service_tier: None,
-            },
-        )
-        .unwrap();
+        let out = translate_request(&req, opts()).unwrap();
         assert_eq!(out.input.len(), 1);
         if let ResponsesInputItem::Message { role, content } = &out.input[0] {
             assert_eq!(role, "user");
@@ -742,14 +723,7 @@ mod tests {
             ]}]
         }))
         .unwrap();
-        let out = translate_request(
-            &req,
-            TranslateOptions {
-                session_id: None,
-                service_tier: None,
-            },
-        )
-        .unwrap();
+        let out = translate_request(&req, opts()).unwrap();
         assert_eq!(out.input.len(), 2);
     }
 
@@ -768,14 +742,7 @@ mod tests {
             }}
         }))
         .unwrap();
-        let out = translate_request(
-            &req,
-            TranslateOptions {
-                session_id: None,
-                service_tier: None,
-            },
-        )
-        .unwrap();
+        let out = translate_request(&req, opts()).unwrap();
         if let Some(ResponsesTextFormat::JsonSchema { schema, .. }) = &out.text.format {
             let required = schema.get("required").and_then(|v| v.as_array()).unwrap();
             assert!(required.iter().any(|v| v == "ok"));
@@ -796,14 +763,7 @@ mod tests {
             }]}]
         }))
         .unwrap();
-        let out = translate_request(
-            &req,
-            TranslateOptions {
-                session_id: None,
-                service_tier: None,
-            },
-        )
-        .unwrap();
+        let out = translate_request(&req, opts()).unwrap();
         assert_eq!(out.input.len(), 1);
         if let ResponsesInputItem::FunctionCallOutput { call_id, .. } = &out.input[0] {
             assert_eq!(call_id, "tu_1");
@@ -815,7 +775,7 @@ mod tests {
     #[test]
     fn translate_returns_only_expected_top_level_fields() {
         let req: MessagesRequest = serde_json::from_value(json!({
-            "model": "sonnet",
+            "model": "claude-sonnet-4-6",
             "messages": [{"role":"user", "content":"hello"}],
             "system": "be helpful",
             "tools": [{"name":"test","input_schema":{"type":"object"}}],
@@ -825,11 +785,12 @@ mod tests {
         let out = translate_request(
             &req,
             TranslateOptions {
-                session_id: None,
-                service_tier: None,
+                model: "gpt-5.4".to_string(),
+                ..opts()
             },
         )
         .unwrap();
+        assert_eq!(out.model, "gpt-5.4");
         let out_value = serde_json::to_value(&out).unwrap();
         let keys: std::collections::BTreeSet<String> =
             out_value.as_object().unwrap().keys().cloned().collect();
