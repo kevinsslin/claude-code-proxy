@@ -15,9 +15,13 @@ use axum::{
     response::Response,
     routing::{get, post},
 };
+use http_body_util::BodyExt;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
+use std::fs::{self, File};
 use std::future::Future;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpListener;
@@ -168,11 +172,26 @@ async fn dispatch_request(
                     started_at,
                 },
             );
+            let (response, details) = record_failed_response(
+                &log,
+                FailedResponseLogContext {
+                    req_id: &req_id,
+                    provider: None,
+                    model: None,
+                    count_tokens,
+                    started_at,
+                },
+                response,
+            )
+            .await;
             monitor_failed(
                 state.monitor.as_ref(),
                 &req_id,
                 Some(response.status()),
-                format!("Invalid JSON: {err}"),
+                details
+                    .as_ref()
+                    .map(|details| details.message.as_str())
+                    .unwrap_or("Invalid JSON"),
             );
             return response;
         }
@@ -193,13 +212,28 @@ async fn dispatch_request(
                     started_at,
                 },
             );
+            let (response, details) = record_failed_response(
+                &log,
+                FailedResponseLogContext {
+                    req_id: &req_id,
+                    provider: None,
+                    model: None,
+                    count_tokens,
+                    started_at,
+                },
+                *response,
+            )
+            .await;
             monitor_failed(
                 state.monitor.as_ref(),
                 &req_id,
                 Some(status),
-                "Invalid JSON",
+                details
+                    .as_ref()
+                    .map(|details| details.message.as_str())
+                    .unwrap_or("Invalid JSON"),
             );
-            return *response;
+            return response;
         }
     };
 
@@ -225,11 +259,26 @@ async fn dispatch_request(
                     started_at,
                 },
             );
+            let (response, details) = record_failed_response(
+                &log,
+                FailedResponseLogContext {
+                    req_id: &req_id,
+                    provider: None,
+                    model: None,
+                    count_tokens,
+                    started_at,
+                },
+                response,
+            )
+            .await;
             monitor_failed(
                 state.monitor.as_ref(),
                 &req_id,
                 Some(response.status()),
-                "Missing model",
+                details
+                    .as_ref()
+                    .map(|details| details.message.as_str())
+                    .unwrap_or("Missing model"),
             );
             return response;
         }
@@ -278,11 +327,26 @@ async fn dispatch_request(
                     started_at,
                 },
             );
+            let (response, details) = record_failed_response(
+                &log,
+                FailedResponseLogContext {
+                    req_id: &req_id,
+                    provider: None,
+                    model: Some(&normalized_model),
+                    count_tokens,
+                    started_at,
+                },
+                response,
+            )
+            .await;
             monitor_failed(
                 state.monitor.as_ref(),
                 &req_id,
                 Some(response.status()),
-                format!("Unknown model \"{normalized_model}\""),
+                details
+                    .as_ref()
+                    .map(|details| details.message.as_str())
+                    .unwrap_or("Unknown model"),
             );
             return response;
         }
@@ -361,16 +425,39 @@ async fn dispatch_request(
             started_at,
         },
     );
-    if response.status().is_success() {
+    let status = response.status();
+    if status.is_success() {
         if let Some(monitor) = state.monitor.as_ref() {
-            monitor.request_completed(&req_id, response.status().as_u16(), None, None);
+            monitor.request_completed(&req_id, status.as_u16(), None, None);
         }
+        return response;
+    }
+
+    let (response, details) = record_failed_response(
+        &log,
+        FailedResponseLogContext {
+            req_id: &req_id,
+            provider: Some(provider.name()),
+            model: Some(&normalized_model),
+            count_tokens,
+            started_at,
+        },
+        response,
+    )
+    .await;
+    if let Some(details) = details.as_ref() {
+        monitor_failed(
+            state.monitor.as_ref(),
+            &req_id,
+            Some(status),
+            details.message.as_str(),
+        );
     } else {
         monitor_failed(
             state.monitor.as_ref(),
             &req_id,
-            Some(response.status()),
-            format!("HTTP {}", response.status().as_u16()),
+            Some(status),
+            format!("HTTP {}", status.as_u16()),
         );
     }
     response
@@ -400,6 +487,172 @@ fn log_request_completed(log: &Logger, ctx: RequestLogContext<'_>) {
             ),
         ])),
     );
+}
+
+struct FailedResponseLogContext<'a> {
+    req_id: &'a str,
+    provider: Option<&'a str>,
+    model: Option<&'a str>,
+    count_tokens: bool,
+    started_at: Instant,
+}
+
+struct FailedResponseDetails {
+    message: String,
+}
+
+async fn record_failed_response(
+    log: &Logger,
+    ctx: FailedResponseLogContext<'_>,
+    response: Response,
+) -> (Response, Option<FailedResponseDetails>) {
+    if response.status().is_success() {
+        return (response, None);
+    }
+
+    let status = response.status();
+    let (parts, body) = response.into_parts();
+    let bytes = match body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(err) => {
+            log.info(
+                "request_failed",
+                Some(serde_json::Map::from_iter([
+                    ("reqId".to_string(), json!(ctx.req_id)),
+                    ("provider".to_string(), json!(ctx.provider)),
+                    ("model".to_string(), json!(ctx.model)),
+                    ("countTokens".to_string(), json!(ctx.count_tokens)),
+                    ("status".to_string(), json!(status.as_u16())),
+                    (
+                        "ms".to_string(),
+                        json!(ctx.started_at.elapsed().as_millis()),
+                    ),
+                    ("bodyReadError".to_string(), json!(err.to_string())),
+                ])),
+            );
+            return (Response::from_parts(parts, Body::empty()), None);
+        }
+    };
+
+    let response_body = response_body_value(&bytes);
+    let message = error_message_from_response(&response_body)
+        .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
+    let document = json!({
+        "reqId": ctx.req_id,
+        "provider": ctx.provider,
+        "model": ctx.model,
+        "countTokens": ctx.count_tokens,
+        "status": status.as_u16(),
+        "elapsedMs": ctx.started_at.elapsed().as_millis(),
+        "message": message,
+        "response": response_body,
+    });
+    let error_file = write_error_capture(ctx.req_id, &redact_error_value(document));
+
+    let mut fields = serde_json::Map::from_iter([
+        ("reqId".to_string(), json!(ctx.req_id)),
+        ("provider".to_string(), json!(ctx.provider)),
+        ("model".to_string(), json!(ctx.model)),
+        ("countTokens".to_string(), json!(ctx.count_tokens)),
+        ("status".to_string(), json!(status.as_u16())),
+        (
+            "ms".to_string(),
+            json!(ctx.started_at.elapsed().as_millis()),
+        ),
+        ("message".to_string(), json!(message)),
+    ]);
+    if let Some(path) = error_file.as_ref() {
+        fields.insert("errorFile".to_string(), json!(path.display().to_string()));
+    }
+    log.info("request_failed", Some(fields));
+
+    (
+        Response::from_parts(parts, Body::from(bytes)),
+        Some(FailedResponseDetails { message }),
+    )
+}
+
+fn response_body_value(bytes: &[u8]) -> Value {
+    match serde_json::from_slice::<Value>(bytes) {
+        Ok(value) => json!({ "json": value }),
+        Err(_) => json!({ "text": String::from_utf8_lossy(bytes) }),
+    }
+}
+
+fn error_message_from_response(response_body: &Value) -> Option<String> {
+    response_body
+        .get("json")
+        .and_then(|body| body.get("error"))
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            response_body
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+        })
+        .map(std::string::ToString::to_string)
+}
+
+fn write_error_capture(req_id: &str, document: &Value) -> Option<PathBuf> {
+    let dir = crate::paths::state_dir().join("errors");
+    fs::create_dir_all(&dir).ok()?;
+    set_mode(&dir, 0o700);
+    let path = dir.join(format!(
+        "{}-{}.json",
+        current_millis(),
+        sanitize_path_part(req_id)
+    ));
+    let mut file = File::create(&path).ok()?;
+    set_mode(&path, 0o600);
+    let payload = serde_json::to_vec_pretty(document).ok()?;
+    file.write_all(&payload).ok()?;
+    file.write_all(b"\n").ok()?;
+    Some(path)
+}
+
+fn sanitize_path_part(raw: &str) -> String {
+    let sanitized: String = raw
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "unknown".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn redact_error_value(value: Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.into_iter().map(redact_error_value).collect()),
+        Value::Object(fields) => {
+            let mut out = Map::new();
+            for (key, value) in fields {
+                if REDACT_KEYS.contains(&key.to_lowercase().as_str()) {
+                    out.insert(key, redact_error_key(value));
+                } else {
+                    out.insert(key, redact_error_value(value));
+                }
+            }
+            Value::Object(out)
+        }
+        value => value,
+    }
+}
+
+fn redact_error_key(value: Value) -> Value {
+    match value {
+        Value::String(value) => Value::String(format!("[redacted len={}]", value.len())),
+        _ => Value::String("[redacted]".to_string()),
+    }
 }
 
 fn monitor_failed(
@@ -476,6 +729,22 @@ fn current_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn set_mode(path: &Path, mode: u32) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(path) {
+            let mut perm = meta.permissions();
+            perm.set_mode(mode);
+            let _ = fs::set_permissions(path, perm);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+    }
 }
 
 #[allow(dead_code)]

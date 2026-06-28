@@ -269,7 +269,8 @@ async fn monitor_records_invalid_json_failure() {
     assert!(state.active.is_empty());
     assert_eq!(state.recent[0].status, RequestStatus::Failed);
     assert_eq!(state.recent[0].http_status, Some(400));
-    assert_eq!(state.recent[0].error.as_deref(), Some("Invalid JSON"));
+    let error = state.recent[0].error.as_deref().unwrap_or("");
+    assert!(error.starts_with("Invalid JSON:"));
 }
 
 #[tokio::test]
@@ -298,8 +299,7 @@ async fn monitor_records_unknown_model_failure() {
     assert!(state.active.is_empty());
     assert_eq!(state.recent[0].status, RequestStatus::Failed);
     assert_eq!(state.recent[0].http_status, Some(400));
-    assert_eq!(
-        state.recent[0].error.as_deref(),
-        Some("Unknown model \"not-a-model\"")
-    );
+    let error = state.recent[0].error.as_deref().unwrap_or("");
+    assert!(error.starts_with("Unknown model \"not-a-model\""));
+    assert!(error.contains("Supported:"));
 }
