@@ -359,55 +359,14 @@ impl<'a> CursorSseFramer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::cursor::connect::encode_connect_frame;
-    use crate::providers::cursor::proto::*;
-    use prost::Message;
-
-    fn make_text_frame(text: &str) -> Vec<u8> {
-        let msg = AgentServerMessage {
-            interaction_update: Some(InteractionUpdate {
-                thinking_delta: None,
-                text_delta: Some(TextDelta {
-                    text: text.to_string(),
-                }),
-                turn_ended: None,
-            }),
-            exec_server_message: None,
-        };
-        let mut payload = Vec::new();
-        msg.encode(&mut payload).unwrap();
-        encode_connect_frame(&payload, 0).to_vec()
-    }
-
-    fn make_usage_frame(input: u64, output: u64) -> Vec<u8> {
-        let msg = AgentServerMessage {
-            interaction_update: Some(InteractionUpdate {
-                thinking_delta: None,
-                text_delta: None,
-                turn_ended: Some(TurnEnded {
-                    input_tokens: input,
-                    output_tokens: output,
-                    cache_read_tokens: 0,
-                    cache_write_tokens: 0,
-                }),
-            }),
-            exec_server_message: None,
-        };
-        let mut payload = Vec::new();
-        msg.encode(&mut payload).unwrap();
-        encode_connect_frame(&payload, 0).to_vec()
-    }
-
-    fn make_end_frame() -> Vec<u8> {
-        encode_connect_frame(b"", 2).to_vec()
-    }
+    use crate::providers::cursor::test_frames;
 
     #[test]
     fn sse_produces_message_start_and_stop() {
         let mut body = Vec::new();
-        body.extend_from_slice(&make_text_frame("hello"));
-        body.extend_from_slice(&make_usage_frame(10, 5));
-        body.extend_from_slice(&make_end_frame());
+        body.extend_from_slice(&test_frames::text_frame("hello"));
+        body.extend_from_slice(&test_frames::usage_frame(10, 5));
+        body.extend_from_slice(&test_frames::end_frame());
 
         let upstream = CursorUpstreamResponse {
             status: 200,
@@ -438,9 +397,9 @@ mod tests {
     #[test]
     fn sse_includes_text_delta_content() {
         let mut body = Vec::new();
-        body.extend_from_slice(&make_text_frame("Hello world"));
-        body.extend_from_slice(&make_usage_frame(10, 2));
-        body.extend_from_slice(&make_end_frame());
+        body.extend_from_slice(&test_frames::text_frame("Hello world"));
+        body.extend_from_slice(&test_frames::usage_frame(10, 2));
+        body.extend_from_slice(&test_frames::end_frame());
 
         let upstream = CursorUpstreamResponse {
             status: 200,
@@ -463,9 +422,9 @@ mod tests {
     #[test]
     fn sse_includes_usage_in_message_delta() {
         let mut body = Vec::new();
-        body.extend_from_slice(&make_text_frame("hi"));
-        body.extend_from_slice(&make_usage_frame(25, 7));
-        body.extend_from_slice(&make_end_frame());
+        body.extend_from_slice(&test_frames::text_frame("hi"));
+        body.extend_from_slice(&test_frames::usage_frame(25, 7));
+        body.extend_from_slice(&test_frames::end_frame());
 
         let upstream = CursorUpstreamResponse {
             status: 200,
@@ -512,24 +471,11 @@ mod tests {
 
     #[test]
     fn sse_emits_thinking_before_text() {
-        // Build a response with thinking delta then text delta
-        let thinking_msg = AgentServerMessage {
-            interaction_update: Some(InteractionUpdate {
-                thinking_delta: Some(ThinkingDelta {
-                    text: "thinking...".to_string(),
-                }),
-                text_delta: None,
-                turn_ended: None,
-            }),
-            exec_server_message: None,
-        };
-        let mut payload = Vec::new();
-        thinking_msg.encode(&mut payload).unwrap();
-        let mut body: Vec<u8> = encode_connect_frame(&payload, 0).to_vec();
+        let mut body = test_frames::thinking_frame("thinking...");
 
-        body.extend_from_slice(&make_text_frame("result"));
-        body.extend_from_slice(&make_usage_frame(10, 5));
-        body.extend_from_slice(&make_end_frame());
+        body.extend_from_slice(&test_frames::text_frame("result"));
+        body.extend_from_slice(&test_frames::usage_frame(10, 5));
+        body.extend_from_slice(&test_frames::end_frame());
 
         let upstream = CursorUpstreamResponse {
             status: 200,

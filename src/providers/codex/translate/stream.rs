@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::anthropic::sse::encode_sse_event;
 use crate::traffic::TrafficCapture;
 
@@ -5,6 +7,184 @@ use super::reducer::{
     ReducerEvent, UpstreamStreamError, map_codex_usage_to_anthropic, reduce_upstream_bytes,
 };
 use super::web_search_compat::build_web_search_compat_blocks;
+
+#[allow(dead_code)]
+enum OpenBlock {
+    Text,
+    Tool { id: String, name: String },
+}
+
+fn emit(
+    out: &mut Vec<u8>,
+    traffic: Option<&TrafficCapture>,
+    event: &str,
+    data: &serde_json::Value,
+) {
+    if let Some(traffic) = traffic {
+        traffic.write_json_event(
+            "050-downstream-event",
+            &serde_json::json!({
+                "event": event,
+                "data": data,
+            }),
+        );
+    }
+    out.extend_from_slice(&encode_sse_event(Some(event), &data.to_string()));
+}
+
+fn ensure_message_start(
+    out: &mut Vec<u8>,
+    traffic: Option<&TrafficCapture>,
+    message_started: &mut bool,
+    message_id: &str,
+    model: &str,
+) {
+    if !*message_started {
+        *message_started = true;
+        let data = serde_json::json!({
+            "type": "message_start",
+            "message": {
+                "id": message_id,
+                "type": "message",
+                "role": "assistant",
+                "model": model,
+                "content": [],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                }
+            }
+        });
+        emit(out, traffic, "message_start", &data);
+    }
+}
+
+fn emit_content_event(
+    out: &mut Vec<u8>,
+    traffic: Option<&TrafficCapture>,
+    message_started: &mut bool,
+    open_blocks: &mut BTreeMap<usize, OpenBlock>,
+    message_id: &str,
+    model: &str,
+    event: &ReducerEvent,
+) -> bool {
+    match event {
+        ReducerEvent::TextStart { index } => {
+            ensure_message_start(out, traffic, message_started, message_id, model);
+            open_blocks.insert(*index, OpenBlock::Text);
+            emit(
+                out,
+                traffic,
+                "content_block_start",
+                &serde_json::json!({
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": {"type": "text", "text": ""}
+                }),
+            );
+            true
+        }
+        ReducerEvent::TextDelta { index, text } => {
+            emit(
+                out,
+                traffic,
+                "content_block_delta",
+                &serde_json::json!({
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": {"type": "text_delta", "text": text}
+                }),
+            );
+            true
+        }
+        ReducerEvent::TextStop { index } => {
+            open_blocks.remove(index);
+            emit(
+                out,
+                traffic,
+                "content_block_stop",
+                &serde_json::json!({
+                    "type": "content_block_stop",
+                    "index": index,
+                }),
+            );
+            true
+        }
+        ReducerEvent::ToolStart { index, id, name } => {
+            ensure_message_start(out, traffic, message_started, message_id, model);
+            open_blocks.insert(
+                *index,
+                OpenBlock::Tool {
+                    id: id.clone(),
+                    name: name.clone(),
+                },
+            );
+            emit(
+                out,
+                traffic,
+                "content_block_start",
+                &serde_json::json!({
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": id,
+                        "name": name,
+                        "input": {}
+                    }
+                }),
+            );
+            true
+        }
+        ReducerEvent::ToolDelta {
+            index,
+            partial_json,
+        } => {
+            emit(
+                out,
+                traffic,
+                "content_block_delta",
+                &serde_json::json!({
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": partial_json
+                    }
+                }),
+            );
+            true
+        }
+        ReducerEvent::ToolStop { index } => {
+            open_blocks.remove(index);
+            emit(
+                out,
+                traffic,
+                "content_block_stop",
+                &serde_json::json!({
+                    "type": "content_block_stop",
+                    "index": index,
+                }),
+            );
+            true
+        }
+        _ => false,
+    }
+}
+
+fn is_content_event(event: &ReducerEvent) -> bool {
+    matches!(
+        event,
+        ReducerEvent::TextStart { .. }
+            | ReducerEvent::TextDelta { .. }
+            | ReducerEvent::TextStop { .. }
+            | ReducerEvent::ToolStart { .. }
+            | ReducerEvent::ToolDelta { .. }
+            | ReducerEvent::ToolStop { .. }
+    )
+}
 
 pub fn translate_stream_bytes(
     upstream: &[u8],
@@ -34,70 +214,9 @@ pub fn translate_stream_bytes_with_traffic(
 
     let mut out = Vec::new();
     let mut message_started = false;
-    let mut open_blocks: std::collections::BTreeMap<usize, OpenBlock> =
-        std::collections::BTreeMap::new();
+    let mut open_blocks: BTreeMap<usize, OpenBlock> = BTreeMap::new();
     let mut web_search_events: Vec<ReducerEvent> = Vec::new();
     let mut deferred_content_events: Vec<ReducerEvent> = Vec::new();
-
-    #[allow(dead_code)]
-    enum OpenBlock {
-        Text,
-        Tool { id: String, name: String },
-    }
-
-    let mut emit = |event: &str, data: &serde_json::Value| -> Result<(), anyhow::Error> {
-        if let Some(traffic) = traffic {
-            traffic.write_json_event(
-                "050-downstream-event",
-                &serde_json::json!({
-                    "event": event,
-                    "data": data,
-                }),
-            );
-        }
-        out.extend_from_slice(&encode_sse_event(Some(event), &data.to_string()));
-        Ok(())
-    };
-
-    let mut ensure_message_start = |emit: &mut dyn FnMut(
-        &str,
-        &serde_json::Value,
-    ) -> Result<(), anyhow::Error>|
-     -> Result<(), anyhow::Error> {
-        if !message_started {
-            message_started = true;
-            let data = serde_json::json!({
-                "type": "message_start",
-                "message": {
-                    "id": message_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "model": model,
-                    "content": [],
-                    "stop_reason": null,
-                    "stop_sequence": null,
-                    "usage": {
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                    }
-                }
-            });
-            emit("message_start", &data)?;
-        }
-        Ok(())
-    };
-
-    let is_content_event = |event: &ReducerEvent| -> bool {
-        matches!(
-            event,
-            ReducerEvent::TextStart { .. }
-                | ReducerEvent::TextDelta { .. }
-                | ReducerEvent::TextStop { .. }
-                | ReducerEvent::ToolStart { .. }
-                | ReducerEvent::ToolDelta { .. }
-                | ReducerEvent::ToolStop { .. }
-        )
-    };
 
     for event in &events {
         if matches!(event, ReducerEvent::WebSearch { .. }) {
@@ -109,91 +228,20 @@ pub fn translate_stream_bytes_with_traffic(
             continue;
         }
 
+        if emit_content_event(
+            &mut out,
+            traffic,
+            &mut message_started,
+            &mut open_blocks,
+            message_id,
+            model,
+            event,
+        ) {
+            continue;
+        }
+
         match event {
-            ReducerEvent::TextStart { index } => {
-                ensure_message_start(&mut emit)?;
-                open_blocks.insert(*index, OpenBlock::Text);
-                emit(
-                    "content_block_start",
-                    &serde_json::json!({
-                        "type": "content_block_start",
-                        "index": index,
-                        "content_block": {"type": "text", "text": ""}
-                    }),
-                )?;
-            }
-            ReducerEvent::TextDelta { index, text } => {
-                emit(
-                    "content_block_delta",
-                    &serde_json::json!({
-                        "type": "content_block_delta",
-                        "index": index,
-                        "delta": {"type": "text_delta", "text": text}
-                    }),
-                )?;
-            }
-            ReducerEvent::TextStop { index } => {
-                open_blocks.remove(index);
-                emit(
-                    "content_block_stop",
-                    &serde_json::json!({
-                        "type": "content_block_stop",
-                        "index": index,
-                    }),
-                )?;
-            }
-            ReducerEvent::ToolStart { index, id, name } => {
-                ensure_message_start(&mut emit)?;
-                open_blocks.insert(
-                    *index,
-                    OpenBlock::Tool {
-                        id: id.clone(),
-                        name: name.clone(),
-                    },
-                );
-                emit(
-                    "content_block_start",
-                    &serde_json::json!({
-                        "type": "content_block_start",
-                        "index": index,
-                        "content_block": {
-                            "type": "tool_use",
-                            "id": id,
-                            "name": name,
-                            "input": {}
-                        }
-                    }),
-                )?;
-            }
-            ReducerEvent::ToolDelta {
-                index,
-                partial_json,
-            } => {
-                emit(
-                    "content_block_delta",
-                    &serde_json::json!({
-                        "type": "content_block_delta",
-                        "index": index,
-                        "delta": {
-                            "type": "input_json_delta",
-                            "partial_json": partial_json
-                        }
-                    }),
-                )?;
-            }
-            ReducerEvent::ToolStop { index } => {
-                open_blocks.remove(index);
-                emit(
-                    "content_block_stop",
-                    &serde_json::json!({
-                        "type": "content_block_stop",
-                        "index": index,
-                    }),
-                )?;
-            }
-            ReducerEvent::ToolProgress { .. } | ReducerEvent::Progress => {
-                // These are just progress indicators; emit nothing in buffered mode
-            }
+            ReducerEvent::ToolProgress { .. } | ReducerEvent::Progress => {}
             ReducerEvent::Finish {
                 stop_reason,
                 usage,
@@ -215,8 +263,16 @@ pub fn translate_stream_bytes_with_traffic(
                         use super::web_search_compat::WebSearchCompatContent;
                         match &block.content {
                             WebSearchCompatContent::ServerToolUse { id, name, input } => {
-                                ensure_message_start(&mut emit)?;
+                                ensure_message_start(
+                                    &mut out,
+                                    traffic,
+                                    &mut message_started,
+                                    message_id,
+                                    model,
+                                );
                                 emit(
+                                    &mut out,
+                                    traffic,
                                     "content_block_start",
                                     &serde_json::json!({
                                         "type": "content_block_start",
@@ -228,8 +284,10 @@ pub fn translate_stream_bytes_with_traffic(
                                             "input": {}
                                         }
                                     }),
-                                )?;
+                                );
                                 emit(
+                                    &mut out,
+                                    traffic,
                                     "content_block_delta",
                                     &serde_json::json!({
                                         "type": "content_block_delta",
@@ -239,14 +297,16 @@ pub fn translate_stream_bytes_with_traffic(
                                             "partial_json": serde_json::to_string(input).unwrap_or_default()
                                         }
                                     }),
-                                )?;
+                                );
                                 emit(
+                                    &mut out,
+                                    traffic,
                                     "content_block_stop",
                                     &serde_json::json!({
                                         "type": "content_block_stop",
                                         "index": block.index,
                                     }),
-                                )?;
+                                );
                             }
                             WebSearchCompatContent::WebSearchToolResult {
                                 tool_use_id,
@@ -263,6 +323,8 @@ pub fn translate_stream_bytes_with_traffic(
                                     })
                                     .collect();
                                 emit(
+                                    &mut out,
+                                    traffic,
                                     "content_block_start",
                                     &serde_json::json!({
                                         "type": "content_block_start",
@@ -273,14 +335,16 @@ pub fn translate_stream_bytes_with_traffic(
                                             "content": result_content,
                                         }
                                     }),
-                                )?;
+                                );
                                 emit(
+                                    &mut out,
+                                    traffic,
                                     "content_block_stop",
                                     &serde_json::json!({
                                         "type": "content_block_stop",
                                         "index": block.index,
                                     }),
-                                )?;
+                                );
                             }
                         }
                     }
@@ -288,96 +352,23 @@ pub fn translate_stream_bytes_with_traffic(
 
                 // Emit deferred content
                 for deferred in &deferred_content_events {
-                    match deferred {
-                        ReducerEvent::TextStart { index } => {
-                            ensure_message_start(&mut emit)?;
-                            open_blocks.insert(*index, OpenBlock::Text);
-                            emit(
-                                "content_block_start",
-                                &serde_json::json!({
-                                    "type": "content_block_start",
-                                    "index": index,
-                                    "content_block": {"type": "text", "text": ""}
-                                }),
-                            )?;
-                        }
-                        ReducerEvent::TextDelta { index, text } => {
-                            emit(
-                                "content_block_delta",
-                                &serde_json::json!({
-                                    "type": "content_block_delta",
-                                    "index": index,
-                                    "delta": {"type": "text_delta", "text": text}
-                                }),
-                            )?;
-                        }
-                        ReducerEvent::TextStop { index } => {
-                            open_blocks.remove(index);
-                            emit(
-                                "content_block_stop",
-                                &serde_json::json!({
-                                    "type": "content_block_stop",
-                                    "index": index,
-                                }),
-                            )?;
-                        }
-                        ReducerEvent::ToolStart { index, id, name } => {
-                            ensure_message_start(&mut emit)?;
-                            open_blocks.insert(
-                                *index,
-                                OpenBlock::Tool {
-                                    id: id.clone(),
-                                    name: name.clone(),
-                                },
-                            );
-                            emit(
-                                "content_block_start",
-                                &serde_json::json!({
-                                    "type": "content_block_start",
-                                    "index": index,
-                                    "content_block": {
-                                        "type": "tool_use",
-                                        "id": id,
-                                        "name": name,
-                                        "input": {}
-                                    }
-                                }),
-                            )?;
-                        }
-                        ReducerEvent::ToolDelta {
-                            index,
-                            partial_json,
-                        } => {
-                            emit(
-                                "content_block_delta",
-                                &serde_json::json!({
-                                    "type": "content_block_delta",
-                                    "index": index,
-                                    "delta": {
-                                        "type": "input_json_delta",
-                                        "partial_json": partial_json
-                                    }
-                                }),
-                            )?;
-                        }
-                        ReducerEvent::ToolStop { index } => {
-                            open_blocks.remove(index);
-                            emit(
-                                "content_block_stop",
-                                &serde_json::json!({
-                                    "type": "content_block_stop",
-                                    "index": index,
-                                }),
-                            )?;
-                        }
-                        _ => {}
-                    }
+                    emit_content_event(
+                        &mut out,
+                        traffic,
+                        &mut message_started,
+                        &mut open_blocks,
+                        message_id,
+                        model,
+                        deferred,
+                    );
                 }
 
-                ensure_message_start(&mut emit)?;
+                ensure_message_start(&mut out, traffic, &mut message_started, message_id, model);
 
                 let mapped = map_codex_usage_to_anthropic(usage, Some(*web_search_requests));
                 emit(
+                    &mut out,
+                    traffic,
                     "message_delta",
                     &serde_json::json!({
                         "type": "message_delta",
@@ -387,8 +378,13 @@ pub fn translate_stream_bytes_with_traffic(
                         },
                         "usage": mapped,
                     }),
-                )?;
-                emit("message_stop", &serde_json::json!({"type": "message_stop"}))?;
+                );
+                emit(
+                    &mut out,
+                    traffic,
+                    "message_stop",
+                    &serde_json::json!({"type": "message_stop"}),
+                );
             }
             _ => {}
         }

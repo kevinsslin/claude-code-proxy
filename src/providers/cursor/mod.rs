@@ -6,6 +6,8 @@ pub mod proto;
 pub mod request;
 pub mod response;
 pub mod sse;
+#[cfg(test)]
+pub(crate) mod test_frames;
 pub mod tool_bridge;
 pub mod tool_use_xml;
 

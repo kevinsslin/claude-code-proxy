@@ -168,54 +168,16 @@ mod tests {
     use super::*;
     use crate::providers::cursor::connect::encode_connect_frame;
     use crate::providers::cursor::proto::*;
+    use crate::providers::cursor::test_frames;
     use prost::Message;
-
-    fn make_text_frame(text: &str) -> Vec<u8> {
-        let msg = AgentServerMessage {
-            interaction_update: Some(InteractionUpdate {
-                thinking_delta: None,
-                text_delta: Some(TextDelta {
-                    text: text.to_string(),
-                }),
-                turn_ended: None,
-            }),
-            exec_server_message: None,
-        };
-        let mut payload = Vec::new();
-        msg.encode(&mut payload).unwrap();
-        encode_connect_frame(&payload, 0).to_vec()
-    }
-
-    fn make_usage_frame(input: u64, output: u64) -> Vec<u8> {
-        let msg = AgentServerMessage {
-            interaction_update: Some(InteractionUpdate {
-                thinking_delta: None,
-                text_delta: None,
-                turn_ended: Some(TurnEnded {
-                    input_tokens: input,
-                    output_tokens: output,
-                    cache_read_tokens: 0,
-                    cache_write_tokens: 0,
-                }),
-            }),
-            exec_server_message: None,
-        };
-        let mut payload = Vec::new();
-        msg.encode(&mut payload).unwrap();
-        encode_connect_frame(&payload, 0).to_vec()
-    }
-
-    fn make_end_frame() -> Vec<u8> {
-        encode_connect_frame(b"", 2).to_vec()
-    }
 
     #[test]
     fn decodes_text_and_usage_events() {
         let mut body = Vec::new();
-        body.extend_from_slice(&make_text_frame("Hello"));
-        body.extend_from_slice(&make_text_frame(" world"));
-        body.extend_from_slice(&make_usage_frame(10, 5));
-        body.extend_from_slice(&make_end_frame());
+        body.extend_from_slice(&test_frames::text_frame("Hello"));
+        body.extend_from_slice(&test_frames::text_frame(" world"));
+        body.extend_from_slice(&test_frames::usage_frame(10, 5));
+        body.extend_from_slice(&test_frames::end_frame());
 
         let events = decode_upstream_response(&body).unwrap();
         assert_eq!(events.len(), 5);
@@ -228,19 +190,7 @@ mod tests {
 
     #[test]
     fn decodes_thinking_delta() {
-        let msg = AgentServerMessage {
-            interaction_update: Some(InteractionUpdate {
-                thinking_delta: Some(ThinkingDelta {
-                    text: "thinking...".to_string(),
-                }),
-                text_delta: None,
-                turn_ended: None,
-            }),
-            exec_server_message: None,
-        };
-        let mut payload = Vec::new();
-        msg.encode(&mut payload).unwrap();
-        let body = encode_connect_frame(&payload, 0).to_vec();
+        let body = test_frames::thinking_frame("thinking...");
 
         let events = decode_upstream_response(&body).unwrap();
         assert_eq!(events.len(), 1);
@@ -275,9 +225,9 @@ mod tests {
     #[test]
     fn accumulate_response_produces_anthropic_json() {
         let mut body = Vec::new();
-        body.extend_from_slice(&make_text_frame("Hello world"));
-        body.extend_from_slice(&make_usage_frame(15, 3));
-        body.extend_from_slice(&make_end_frame());
+        body.extend_from_slice(&test_frames::text_frame("Hello world"));
+        body.extend_from_slice(&test_frames::usage_frame(15, 3));
+        body.extend_from_slice(&test_frames::end_frame());
 
         let upstream = CursorUpstreamResponse {
             status: 200,
@@ -324,10 +274,10 @@ mod tests {
     #[test]
     fn multiple_text_deltas_accumulate() {
         let mut body = Vec::new();
-        body.extend_from_slice(&make_text_frame("Hello "));
-        body.extend_from_slice(&make_text_frame("world"));
-        body.extend_from_slice(&make_usage_frame(10, 2));
-        body.extend_from_slice(&make_end_frame());
+        body.extend_from_slice(&test_frames::text_frame("Hello "));
+        body.extend_from_slice(&test_frames::text_frame("world"));
+        body.extend_from_slice(&test_frames::usage_frame(10, 2));
+        body.extend_from_slice(&test_frames::end_frame());
 
         let events = decode_upstream_response(&body).unwrap();
         let text: String = events

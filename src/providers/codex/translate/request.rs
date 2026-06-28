@@ -3,6 +3,9 @@ use serde_json::Value;
 
 use crate::anthropic::schema::MessagesRequest;
 use crate::config;
+use crate::providers::translate_shared::{
+    ContentBlock, flatten_system_text, image_source_to_url, normalize_content, read_effort,
+};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -324,48 +327,6 @@ pub fn translate_request(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn flatten_system_text(system: Option<&Value>) -> Option<String> {
-    let system = system?;
-    let texts: Vec<String> = match system {
-        Value::String(s) => vec![s.clone()],
-        Value::Array(arr) => arr
-            .iter()
-            .filter_map(|b| {
-                let text = b.get("text").and_then(|v| v.as_str())?;
-                if text.starts_with("x-anthropic-billing-header:") {
-                    None
-                } else {
-                    Some(text.to_string())
-                }
-            })
-            .collect(),
-        _ => return None,
-    };
-    if texts.is_empty() {
-        None
-    } else {
-        Some(texts.join("\n\n"))
-    }
-}
-
-fn read_effort(req: &MessagesRequest) -> Result<Option<&str>, anyhow::Error> {
-    let output_config = match req.extra.get("output_config") {
-        Some(Value::Object(m)) => m,
-        _ => return Ok(None),
-    };
-    match output_config.get("effort") {
-        Some(Value::String(s)) => {
-            let valid = ["low", "medium", "high", "max"];
-            if valid.contains(&s.as_str()) {
-                Ok(Some(s.as_str()))
-            } else {
-                anyhow::bail!("Invalid output_config.effort: {s}")
-            }
-        }
-        _ => Ok(None),
-    }
-}
-
 fn read_output_format(req: &MessagesRequest) -> Option<ResponsesTextFormat> {
     let output_config = req.extra.get("output_config")?.as_object()?;
     let format = output_config.get("format")?.as_object()?;
@@ -512,7 +473,7 @@ fn build_input(req: &MessagesRequest) -> Vec<ResponsesInputItem> {
     let mut out: Vec<ResponsesInputItem> = Vec::new();
 
     for msg in &req.messages {
-        let blocks = normalize_content(&msg.content);
+        let blocks = normalize_content(&msg.content, Value::Null);
         match msg.role.as_str() {
             "user" => {
                 let mut parts: Vec<ResponsesContentPart> = Vec::new();
@@ -522,13 +483,8 @@ fn build_input(req: &MessagesRequest) -> Vec<ResponsesInputItem> {
                             parts.push(ResponsesContentPart::InputText { text: text.clone() });
                         }
                         ContentBlock::Image { source } => {
-                            let url = if source.source_type == "url" {
-                                source.data.clone()
-                            } else {
-                                format!("data:{};base64,{}", source.media_type, source.data)
-                            };
                             parts.push(ResponsesContentPart::InputImage {
-                                image_url: url,
+                                image_url: image_source_to_url(source),
                                 detail: None,
                             });
                         }
@@ -621,125 +577,8 @@ fn build_input(req: &MessagesRequest) -> Vec<ResponsesInputItem> {
 }
 
 // ---------------------------------------------------------------------------
-// Content block normalization
+// Tool result rendering
 // ---------------------------------------------------------------------------
-
-#[derive(Debug)]
-pub enum ContentBlock {
-    Text {
-        text: String,
-    },
-    Image {
-        source: ImageSource,
-    },
-    ToolUse {
-        id: String,
-        name: String,
-        input: Value,
-    },
-    ToolResult {
-        tool_use_id: String,
-        content: Value,
-        is_error: Option<bool>,
-    },
-}
-
-#[derive(Debug)]
-pub struct ImageSource {
-    pub media_type: String,
-    pub data: String,
-    pub source_type: String,
-}
-
-fn normalize_content(content: &Value) -> Vec<ContentBlock> {
-    match content {
-        Value::String(s) => {
-            vec![ContentBlock::Text { text: s.clone() }]
-        }
-        Value::Array(arr) => {
-            let mut blocks = Vec::new();
-            for item in arr {
-                if let Some(block) = parse_content_block(item) {
-                    blocks.push(block);
-                }
-            }
-            blocks
-        }
-        _ => Vec::new(),
-    }
-}
-
-fn parse_content_block(value: &Value) -> Option<ContentBlock> {
-    let kind = value.get("type").and_then(|v| v.as_str())?;
-    match kind {
-        "text" => {
-            let text = value
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            Some(ContentBlock::Text { text })
-        }
-        "image" => {
-            let source = value.get("source")?;
-            let media_type = source
-                .get("media_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("image/png")
-                .to_string();
-            let source_type = source
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("base64")
-                .to_string();
-            let data = if source_type == "url" {
-                source.get("url").and_then(|v| v.as_str()).unwrap_or("")
-            } else {
-                source.get("data").and_then(|v| v.as_str()).unwrap_or("")
-            }
-            .to_string();
-            Some(ContentBlock::Image {
-                source: ImageSource {
-                    media_type,
-                    data,
-                    source_type,
-                },
-            })
-        }
-        "tool_use" => {
-            let id = value
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let name = value
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let input = value.get("input").cloned().unwrap_or(Value::Null);
-            Some(ContentBlock::ToolUse { id, name, input })
-        }
-        "tool_result" => {
-            let tool_use_id = value
-                .get("tool_use_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let content = value
-                .get("content")
-                .cloned()
-                .unwrap_or(Value::String(String::new()));
-            let is_error = value.get("is_error").and_then(|v| v.as_bool());
-            Some(ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-            })
-        }
-        _ => None,
-    }
-}
 
 fn tool_result_to_string(content: &Value) -> String {
     match content {

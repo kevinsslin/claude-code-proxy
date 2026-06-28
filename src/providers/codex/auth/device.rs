@@ -220,6 +220,7 @@ impl Default for DeviceAuthClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::codex::auth::test_http;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
 
@@ -246,9 +247,7 @@ mod tests {
 
     /// A minimal HTTP test server for the device auth flow.
     struct MockDeviceServer {
-        url: String,
-        #[allow(dead_code)]
-        shutdown: Arc<AtomicBool>,
+        server: test_http::MockServer,
         saw_init: Arc<AtomicBool>,
         saw_token_exchange: Arc<AtomicBool>,
         saw_poll: Arc<AtomicBool>,
@@ -262,135 +261,40 @@ mod tests {
         InitThenTimeout,
     }
 
-    fn json_response(status: u16, body: &str) -> String {
-        let reason = match status {
-            200 => "OK",
-            403 => "Forbidden",
-            404 => "Not Found",
-            500 => "Internal Server Error",
-            _ => "Unknown",
-        };
-        format!(
-            "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
-            body.len(),
-        )
-    }
-
-    fn read_http_request(stream: &mut std::net::TcpStream) -> Option<String> {
-        use std::io::Read;
-
-        let _ = stream.set_nonblocking(false);
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-        let mut request = Vec::new();
-        let mut chunk = [0; 4096];
-
-        loop {
-            let n = stream.read(&mut chunk).ok()?;
-            if n == 0 {
-                break;
-            }
-            request.extend_from_slice(&chunk[..n]);
-
-            if let Some(header_end) = find_header_end(&request) {
-                let content_length = content_length(&request[..header_end]).unwrap_or(0);
-                if request.len() >= header_end + 4 + content_length {
-                    break;
-                }
-            }
-        }
-
-        if request.is_empty() {
-            None
-        } else {
-            Some(String::from_utf8_lossy(&request).to_string())
-        }
-    }
-
-    fn find_header_end(bytes: &[u8]) -> Option<usize> {
-        bytes.windows(4).position(|window| window == b"\r\n\r\n")
-    }
-
-    fn content_length(headers: &[u8]) -> Option<usize> {
-        let text = String::from_utf8_lossy(headers);
-        text.lines().find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            if name.eq_ignore_ascii_case("content-length") {
-                value.trim().parse().ok()
-            } else {
-                None
-            }
-        })
-    }
-
     impl MockDeviceServer {
         fn new(scenario: DeviceScenario) -> Self {
             let saw_init = Arc::new(AtomicBool::new(false));
             let saw_token_exchange = Arc::new(AtomicBool::new(false));
             let saw_poll = Arc::new(AtomicBool::new(false));
-            let shutdown = Arc::new(AtomicBool::new(false));
 
             let si = saw_init.clone();
             let ste = saw_token_exchange.clone();
             let sp = saw_poll.clone();
-            let sd = shutdown.clone();
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
-            let addr = listener.local_addr().unwrap();
-            let url = format!("http://{addr}");
-            listener.set_nonblocking(true).expect("set nonblocking");
-            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-
-            std::thread::spawn(move || {
-                let _ = ready_tx.send(());
-                loop {
-                    if sd.load(Ordering::Relaxed) {
-                        return;
+            let server = test_http::spawn_mock_server(
+                "mock device server should become ready",
+                move |request| match scenario {
+                    DeviceScenario::SuccessAfterPending => {
+                        Self::handle_success_after_pending(request, &si, &sp, &ste)
                     }
-                    match listener.accept() {
-                        Ok((mut stream, _)) => {
-                            use std::io::Write;
-                            let Some(request) = read_http_request(&mut stream) else {
-                                continue;
-                            };
-
-                            let response = match scenario {
-                                DeviceScenario::SuccessAfterPending => {
-                                    Self::handle_success_after_pending(&request, &si, &sp, &ste)
-                                }
-                                DeviceScenario::InitFailure => {
-                                    Self::handle_init_failure(&request, &si)
-                                }
-                                DeviceScenario::PollFailure => {
-                                    Self::handle_poll_failure(&request, &si, &sp)
-                                }
-                                DeviceScenario::TokenExchangeFailure => {
-                                    Self::handle_token_exchange_failure(&request, &si, &sp, &ste)
-                                }
-                                DeviceScenario::InitThenTimeout => {
-                                    Self::handle_init_then_timeout(&request, &si)
-                                }
-                            };
-
-                            let _ = stream.write_all(response.as_bytes());
-                            let _ = stream.flush();
-                        }
-                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            std::thread::sleep(Duration::from_millis(10));
-                        }
-                        Err(_) => break,
+                    DeviceScenario::InitFailure => Self::handle_init_failure(request, &si),
+                    DeviceScenario::PollFailure => Self::handle_poll_failure(request, &si, &sp),
+                    DeviceScenario::TokenExchangeFailure => {
+                        Self::handle_token_exchange_failure(request, &si, &sp, &ste)
                     }
-                }
-            });
-            ready_rx
-                .recv_timeout(Duration::from_secs(1))
-                .expect("mock device server should become ready");
+                    DeviceScenario::InitThenTimeout => Self::handle_init_then_timeout(request, &si),
+                },
+            );
 
             Self {
-                url,
-                shutdown,
+                server,
                 saw_init,
                 saw_token_exchange,
                 saw_poll,
             }
+        }
+
+        fn url(&self) -> &str {
+            &self.server.url
         }
 
         fn handle_success_after_pending(
@@ -401,33 +305,33 @@ mod tests {
         ) -> String {
             if request.contains("/api/accounts/deviceauth/usercode") {
                 saw_init.store(true, Ordering::Relaxed);
-                Self::json_response(
+                test_http::json_response(
                     200,
                     r#"{"device_auth_id":"daid_1","user_code":"ABC-123","interval":"2"}"#,
                 )
             } else if request.contains("/api/accounts/deviceauth/token") {
                 saw_poll.store(true, Ordering::Relaxed);
-                Self::json_response(
+                test_http::json_response(
                     200,
                     r#"{"authorization_code":"auth_code_1","code_verifier":"verifier_1"}"#,
                 )
             } else if request.contains("/oauth/token") {
                 saw_exchange.store(true, Ordering::Relaxed);
-                Self::json_response(
+                test_http::json_response(
                     200,
                     r#"{"access_token":"at_1","refresh_token":"rt_1","expires_in":3600,"id_token":"fake_id_token"}"#,
                 )
             } else {
-                Self::json_response(404, r#"{"error":"not found"}"#)
+                test_http::json_response(404, r#"{"error":"not found"}"#)
             }
         }
 
         fn handle_init_failure(request: &str, saw_init: &AtomicBool) -> String {
             if request.contains("/api/accounts/deviceauth/usercode") {
                 saw_init.store(true, Ordering::Relaxed);
-                Self::json_response(500, r#"{"error":"server error"}"#)
+                test_http::json_response(500, r#"{"error":"server error"}"#)
             } else {
-                Self::json_response(404, r#"{"error":"not found"}"#)
+                test_http::json_response(404, r#"{"error":"not found"}"#)
             }
         }
 
@@ -438,15 +342,15 @@ mod tests {
         ) -> String {
             if request.contains("/api/accounts/deviceauth/usercode") {
                 saw_init.store(true, Ordering::Relaxed);
-                Self::json_response(
+                test_http::json_response(
                     200,
                     r#"{"device_auth_id":"daid_1","user_code":"ABC-123","interval":"2"}"#,
                 )
             } else if request.contains("/api/accounts/deviceauth/token") {
                 saw_poll.store(true, Ordering::Relaxed);
-                Self::json_response(500, r#"{"error":"poll error"}"#)
+                test_http::json_response(500, r#"{"error":"poll error"}"#)
             } else {
-                Self::json_response(404, r#"{"error":"not found"}"#)
+                test_http::json_response(404, r#"{"error":"not found"}"#)
             }
         }
 
@@ -458,55 +362,35 @@ mod tests {
         ) -> String {
             if request.contains("/api/accounts/deviceauth/usercode") {
                 saw_init.store(true, Ordering::Relaxed);
-                Self::json_response(
+                test_http::json_response(
                     200,
                     r#"{"device_auth_id":"daid_1","user_code":"ABC-123","interval":"2"}"#,
                 )
             } else if request.contains("/api/accounts/deviceauth/token") {
                 saw_poll.store(true, Ordering::Relaxed);
-                Self::json_response(
+                test_http::json_response(
                     200,
                     r#"{"authorization_code":"auth_code_1","code_verifier":"verifier_1"}"#,
                 )
             } else if request.contains("/oauth/token") {
                 saw_exchange.store(true, Ordering::Relaxed);
-                Self::json_response(500, r#"{"error":"exchange failed"}"#)
+                test_http::json_response(500, r#"{"error":"exchange failed"}"#)
             } else {
-                Self::json_response(404, r#"{"error":"not found"}"#)
+                test_http::json_response(404, r#"{"error":"not found"}"#)
             }
         }
 
         fn handle_init_then_timeout(request: &str, saw_init: &AtomicBool) -> String {
             if request.contains("/api/accounts/deviceauth/usercode") {
                 saw_init.store(true, Ordering::Relaxed);
-                Self::json_response(
+                test_http::json_response(
                     200,
                     r#"{"device_auth_id":"daid_1","user_code":"ABC-123","interval":"99999"}"#,
                 )
             } else {
                 // Return 403 to keep polling
-                Self::json_response(403, r#"{"error":"pending"}"#)
+                test_http::json_response(403, r#"{"error":"pending"}"#)
             }
-        }
-
-        fn json_response(status: u16, body: &str) -> String {
-            let reason = match status {
-                200 => "OK",
-                403 => "Forbidden",
-                404 => "Not Found",
-                500 => "Internal Server Error",
-                _ => "Unknown",
-            };
-            format!(
-                "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
-                body.len(),
-            )
-        }
-    }
-
-    impl Drop for MockDeviceServer {
-        fn drop(&mut self) {
-            self.shutdown.store(true, Ordering::Relaxed);
         }
     }
 
@@ -514,7 +398,7 @@ mod tests {
     fn device_flow_success_after_pending() {
         let _guard = device_flow_test_lock();
         let server = MockDeviceServer::new(DeviceScenario::SuccessAfterPending);
-        let client = DeviceAuthClient::with_issuer(&server.url);
+        let client = DeviceAuthClient::with_issuer(server.url());
         let tokens = client.run().unwrap();
         assert_eq!(tokens.access_token, "at_1");
         assert_eq!(tokens.refresh_token, "rt_1");
@@ -527,7 +411,7 @@ mod tests {
     fn device_flow_reports_init_failure() {
         let _guard = device_flow_test_lock();
         let server = MockDeviceServer::new(DeviceScenario::InitFailure);
-        let err = DeviceAuthClient::with_issuer(&server.url)
+        let err = DeviceAuthClient::with_issuer(server.url())
             .run()
             .unwrap_err();
         assert!(
@@ -541,7 +425,7 @@ mod tests {
     fn device_flow_reports_poll_failure() {
         let _guard = device_flow_test_lock();
         let server = MockDeviceServer::new(DeviceScenario::PollFailure);
-        let err = DeviceAuthClient::with_issuer(&server.url)
+        let err = DeviceAuthClient::with_issuer(server.url())
             .run()
             .unwrap_err();
         assert!(
@@ -556,7 +440,7 @@ mod tests {
     fn device_flow_reports_token_exchange_failure() {
         let _guard = device_flow_test_lock();
         let server = MockDeviceServer::new(DeviceScenario::TokenExchangeFailure);
-        let err = DeviceAuthClient::with_issuer(&server.url)
+        let err = DeviceAuthClient::with_issuer(server.url())
             .run()
             .unwrap_err();
         assert!(
@@ -573,7 +457,7 @@ mod tests {
         let _guard = device_flow_test_lock();
         let server = MockDeviceServer::new(DeviceScenario::InitThenTimeout);
         let client = DeviceAuthClient {
-            issuer: server.url.clone(),
+            issuer: server.url().to_string(),
             client: reqwest::blocking::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()
@@ -595,80 +479,49 @@ mod tests {
         let saw_init = Arc::new(AtomicBool::new(false));
         let saw_exchange = Arc::new(AtomicBool::new(false));
         let saw_second_poll = Arc::new(AtomicBool::new(false));
-        let shutdown = Arc::new(AtomicBool::new(false));
-
         let si = saw_init.clone();
         let sp403 = saw_poll_403.clone();
         let sp2 = saw_second_poll.clone();
         let ste = saw_exchange.clone();
-        let sd = shutdown.clone();
         let poll_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let pc = poll_count.clone();
 
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().unwrap();
-        let url = format!("http://{addr}");
-        listener.set_nonblocking(true).expect("nonblocking");
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-
-        std::thread::spawn(move || {
-            let _ = ready_tx.send(());
-            loop {
-                if sd.load(Ordering::Relaxed) {
-                    return;
-                }
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        use std::io::Write;
-                        let Some(request) = read_http_request(&mut stream) else {
-                            continue;
-                        };
-
-                        let response = if request.contains("/api/accounts/deviceauth/usercode") {
-                            si.store(true, Ordering::Relaxed);
-                            json_response(
-                                200,
-                                r#"{"device_auth_id":"daid_1","user_code":"ABC-123","interval":"1"}"#,
-                            )
-                        } else if request.contains("/api/accounts/deviceauth/token") {
-                            let count = pc.fetch_add(1, Ordering::Relaxed);
-                            if count == 0 {
-                                sp403.store(true, Ordering::Relaxed);
-                                json_response(403, r#"{"error":"pending"}"#)
-                            } else {
-                                sp2.store(true, Ordering::Relaxed);
-                                json_response(
-                                    200,
-                                    r#"{"authorization_code":"ac_2","code_verifier":"cv_2"}"#,
-                                )
-                            }
-                        } else if request.contains("/oauth/token") {
-                            ste.store(true, Ordering::Relaxed);
-                            json_response(
-                                200,
-                                r#"{"access_token":"at_2","refresh_token":"rt_2","expires_in":3600}"#,
-                            )
-                        } else {
-                            json_response(404, r#"{"error":"nf"}"#)
-                        };
-
-                        let _ = stream.write_all(response.as_bytes());
-                        let _ = stream.flush();
+        let server = test_http::spawn_mock_server(
+            "mock device server should become ready",
+            move |request| {
+                if request.contains("/api/accounts/deviceauth/usercode") {
+                    si.store(true, Ordering::Relaxed);
+                    test_http::json_response(
+                        200,
+                        r#"{"device_auth_id":"daid_1","user_code":"ABC-123","interval":"1"}"#,
+                    )
+                } else if request.contains("/api/accounts/deviceauth/token") {
+                    let count = pc.fetch_add(1, Ordering::Relaxed);
+                    if count == 0 {
+                        sp403.store(true, Ordering::Relaxed);
+                        test_http::json_response(403, r#"{"error":"pending"}"#)
+                    } else {
+                        sp2.store(true, Ordering::Relaxed);
+                        test_http::json_response(
+                            200,
+                            r#"{"authorization_code":"ac_2","code_verifier":"cv_2"}"#,
+                        )
                     }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(_) => break,
+                } else if request.contains("/oauth/token") {
+                    ste.store(true, Ordering::Relaxed);
+                    test_http::json_response(
+                        200,
+                        r#"{"access_token":"at_2","refresh_token":"rt_2","expires_in":3600}"#,
+                    )
+                } else {
+                    test_http::json_response(404, r#"{"error":"nf"}"#)
                 }
-            }
-        });
-        ready_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("mock device server should become ready");
+            },
+        );
 
         let sleeper = MockSleeper::default();
         let client = DeviceAuthClient {
-            issuer: url,
+            issuer: server.url.clone(),
             client: reqwest::blocking::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()
@@ -682,7 +535,6 @@ mod tests {
         assert!(saw_poll_403.load(Ordering::Relaxed));
         assert!(saw_second_poll.load(Ordering::Relaxed));
         assert!(saw_exchange.load(Ordering::Relaxed));
-        shutdown.store(true, Ordering::Relaxed);
     }
 
     #[test]
@@ -691,78 +543,47 @@ mod tests {
         let saw_init = Arc::new(AtomicBool::new(false));
         let saw_poll_404 = Arc::new(AtomicBool::new(false));
         let saw_exchange = Arc::new(AtomicBool::new(false));
-        let shutdown = Arc::new(AtomicBool::new(false));
-
         let si = saw_init.clone();
         let sp404 = saw_poll_404.clone();
         let ste = saw_exchange.clone();
-        let sd = shutdown.clone();
         let poll_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let pc = poll_count.clone();
 
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().unwrap();
-        let url = format!("http://{addr}");
-        listener.set_nonblocking(true).expect("nonblocking");
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-
-        std::thread::spawn(move || {
-            let _ = ready_tx.send(());
-            loop {
-                if sd.load(Ordering::Relaxed) {
-                    return;
-                }
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        use std::io::Write;
-                        let Some(request) = read_http_request(&mut stream) else {
-                            continue;
-                        };
-
-                        let response = if request.contains("/api/accounts/deviceauth/usercode") {
-                            si.store(true, Ordering::Relaxed);
-                            json_response(
-                                200,
-                                r#"{"device_auth_id":"daid_1","user_code":"ABC-123","interval":"1"}"#,
-                            )
-                        } else if request.contains("/api/accounts/deviceauth/token") {
-                            let count = pc.fetch_add(1, Ordering::Relaxed);
-                            if count == 0 {
-                                sp404.store(true, Ordering::Relaxed);
-                                json_response(404, r#"{"error":"nf"}"#)
-                            } else {
-                                json_response(
-                                    200,
-                                    r#"{"authorization_code":"ac_3","code_verifier":"cv_3"}"#,
-                                )
-                            }
-                        } else if request.contains("/oauth/token") {
-                            ste.store(true, Ordering::Relaxed);
-                            json_response(
-                                200,
-                                r#"{"access_token":"at_3","refresh_token":"rt_3","expires_in":3600}"#,
-                            )
-                        } else {
-                            json_response(404, r#"{"error":"nf"}"#)
-                        };
-
-                        let _ = stream.write_all(response.as_bytes());
-                        let _ = stream.flush();
+        let server = test_http::spawn_mock_server(
+            "mock device server should become ready",
+            move |request| {
+                if request.contains("/api/accounts/deviceauth/usercode") {
+                    si.store(true, Ordering::Relaxed);
+                    test_http::json_response(
+                        200,
+                        r#"{"device_auth_id":"daid_1","user_code":"ABC-123","interval":"1"}"#,
+                    )
+                } else if request.contains("/api/accounts/deviceauth/token") {
+                    let count = pc.fetch_add(1, Ordering::Relaxed);
+                    if count == 0 {
+                        sp404.store(true, Ordering::Relaxed);
+                        test_http::json_response(404, r#"{"error":"nf"}"#)
+                    } else {
+                        test_http::json_response(
+                            200,
+                            r#"{"authorization_code":"ac_3","code_verifier":"cv_3"}"#,
+                        )
                     }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(_) => break,
+                } else if request.contains("/oauth/token") {
+                    ste.store(true, Ordering::Relaxed);
+                    test_http::json_response(
+                        200,
+                        r#"{"access_token":"at_3","refresh_token":"rt_3","expires_in":3600}"#,
+                    )
+                } else {
+                    test_http::json_response(404, r#"{"error":"nf"}"#)
                 }
-            }
-        });
-        ready_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("mock device server should become ready");
+            },
+        );
 
         let sleeper = MockSleeper::default();
         let client = DeviceAuthClient {
-            issuer: url,
+            issuer: server.url.clone(),
             client: reqwest::blocking::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()
@@ -775,7 +596,6 @@ mod tests {
         assert!(saw_init.load(Ordering::Relaxed));
         assert!(saw_poll_404.load(Ordering::Relaxed));
         assert!(saw_exchange.load(Ordering::Relaxed));
-        shutdown.store(true, Ordering::Relaxed);
     }
 
     #[test]
