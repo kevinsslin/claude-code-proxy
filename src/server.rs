@@ -43,8 +43,15 @@ async fn serve_inner(
     config: ServerConfig,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(("127.0.0.1", config.port)).await?;
+    let listener = bind_proxy_listener(config.port).await?;
     serve_listener(listener, config.monitor, shutdown).await
+}
+
+pub async fn bind_proxy_listener(port: u16) -> anyhow::Result<TcpListener> {
+    let addr = format!("127.0.0.1:{port}");
+    TcpListener::bind(&addr)
+        .await
+        .map_err(|err| anyhow::anyhow!("failed to bind proxy listener on {addr}: {err}"))
 }
 
 pub async fn serve_listener(

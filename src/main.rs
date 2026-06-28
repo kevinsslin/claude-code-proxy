@@ -99,8 +99,7 @@ fn main() -> Result<()> {
                 ServeMode::Monitor => {
                     let monitor = MonitorHandle::default();
                     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-                    let listener = runtime
-                        .block_on(tokio::net::TcpListener::bind(("127.0.0.1", effective_port)))?;
+                    let listener = runtime.block_on(server::bind_proxy_listener(effective_port))?;
                     let server_monitor = monitor.clone();
                     let server_task = runtime.spawn(server::serve_listener(
                         listener,

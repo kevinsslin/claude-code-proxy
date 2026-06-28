@@ -3,7 +3,7 @@ use axum::http::{Method, Request, StatusCode};
 use claude_code_proxy::{
     monitor::{MonitorHandle, RequestStatus},
     registry::Registry,
-    server::{app, app_with_monitor},
+    server::{app, app_with_monitor, bind_proxy_listener},
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -11,6 +11,17 @@ use tower::util::ServiceExt;
 
 fn body_string(json: &str) -> Body {
     Body::from(json.to_string())
+}
+
+#[tokio::test]
+async fn bind_error_names_address_and_port() {
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = occupied.local_addr().unwrap().port();
+
+    let err = bind_proxy_listener(port).await.unwrap_err().to_string();
+
+    assert!(err.contains(&format!("127.0.0.1:{port}")));
+    assert!(err.contains("failed to bind proxy listener"));
 }
 
 #[tokio::test]
