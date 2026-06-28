@@ -303,22 +303,28 @@ pub async fn codex_websocket_request(
         } else {
             // Connection is alive, send the request through it
             let ws_msg = Message::Text(body_json.clone());
-            ws_guard.send(ws_msg).await.map_err(|e| CodexError {
-                status: 0,
-                message: format!("WebSocket send error: {e}"),
-                detail: None,
-                retry_after: None,
-                origin: CodexErrorOrigin::WebSocket,
+            ws_guard.send(ws_msg).await.map_err(|e| {
+                if let Some(key) = pool_key {
+                    invalidate_codex_websocket_pool_key(key);
+                }
+                CodexError {
+                    status: 0,
+                    message: format!("WebSocket send error: {e}"),
+                    detail: None,
+                    retry_after: None,
+                    origin: CodexErrorOrigin::WebSocket,
+                }
             })?;
 
             // Collect events
             let (sse_body, terminal_event) =
                 collect_ws_events(&mut ws_guard, idle_timeout_ms, pool_key, traffic).await?;
+            let Some(terminal_event) = terminal_event else {
+                return Err(missing_terminal_error());
+            };
 
             // Handle previous response missing
-            if let Some(terminal) = &terminal_event
-                && is_previous_response_missing(&terminal.payload)
-            {
+            if is_previous_response_missing(&terminal_event.payload) {
                 return Err(CodexError {
                     status: 0,
                     message: "Previous response not found".to_string(),
@@ -329,12 +335,8 @@ pub async fn codex_websocket_request(
             }
 
             // Extract status from error events
-            let status = if let Some(terminal) = &terminal_event {
-                if terminal.event_type == "error" {
-                    extract_status_from_error(&terminal.payload).unwrap_or(500)
-                } else {
-                    200
-                }
+            let status = if terminal_event.event_type == "error" {
+                extract_status_from_error(&terminal_event.payload).unwrap_or(500)
             } else {
                 200
             };
@@ -375,10 +377,11 @@ pub async fn codex_websocket_request(
 
         let (sse_body, terminal_event) =
             collect_ws_events(&mut ws_guard, idle_timeout_ms, pool_key, traffic).await?;
+        let Some(terminal_event) = terminal_event else {
+            return Err(missing_terminal_error());
+        };
 
-        if let Some(terminal) = &terminal_event
-            && is_previous_response_missing(&terminal.payload)
-        {
+        if is_previous_response_missing(&terminal_event.payload) {
             if let Some(key) = pool_key {
                 invalidate_codex_websocket_pool_key(key);
             }
@@ -393,21 +396,14 @@ pub async fn codex_websocket_request(
 
         // Pool the connection if we have a key and it was successful
         if let Some(key) = pool_key {
-            let should_pool = terminal_event
-                .as_ref()
-                .map(|t| t.event_type == "response.completed")
-                .unwrap_or(false);
+            let should_pool = terminal_event.event_type == "response.completed";
             if should_pool {
                 pool_insert(key.to_string(), entry.clone());
             }
         }
 
-        let status = if let Some(terminal) = &terminal_event {
-            if terminal.event_type == "error" {
-                extract_status_from_error(&terminal.payload).unwrap_or(500)
-            } else {
-                200
-            }
+        let status = if terminal_event.event_type == "error" {
+            extract_status_from_error(&terminal_event.payload).unwrap_or(500)
         } else {
             200
         };
@@ -423,6 +419,16 @@ pub async fn codex_websocket_request(
             status,
             headers: vec![],
         })
+    }
+}
+
+fn missing_terminal_error() -> CodexError {
+    CodexError {
+        status: 0,
+        message: "WebSocket connection closed before terminal Codex response event".to_string(),
+        detail: None,
+        retry_after: None,
+        origin: CodexErrorOrigin::WebSocket,
     }
 }
 
@@ -496,13 +502,11 @@ async fn connect_with_timeout(
     CodexError,
 > {
     // Build an http::Request with the given headers for the WebSocket upgrade
+    let host = websocket_host_header(url);
     let mut req_builder = http::Request::builder()
         .uri(url)
         .method("GET")
-        .header(
-            "Host",
-            url::Url::parse(url).map_or("".to_string(), |u| u.host_str().unwrap_or("").to_string()),
-        )
+        .header("Host", host)
         .header("Connection", "Upgrade")
         .header("Upgrade", "websocket")
         .header("Sec-WebSocket-Version", "13")
@@ -563,6 +567,13 @@ async fn connect_with_timeout(
                 origin: CodexErrorOrigin::WebSocket,
             }
         })
+}
+
+fn websocket_host_header(url: &str) -> String {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return String::new();
+    };
+    parsed[url::Position::BeforeHost..url::Position::AfterPort].to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -642,6 +653,9 @@ async fn collect_ws_events(
             }
             Some(Ok(Message::Binary(_))) => {
                 // Reject binary frames
+                if let Some(key) = pool_key {
+                    invalidate_codex_websocket_pool_key(key);
+                }
                 return Err(CodexError {
                     status: 0,
                     message: "WebSocket binary frames not supported".to_string(),
@@ -746,6 +760,19 @@ mod tests {
     }
 
     #[test]
+    fn websocket_host_header_preserves_explicit_port() {
+        assert_eq!(
+            websocket_host_header("wss://chatgpt.com/backend-api/codex/responses"),
+            "chatgpt.com"
+        );
+        assert_eq!(
+            websocket_host_header("ws://127.0.0.1:4141/backend-api/codex/responses"),
+            "127.0.0.1:4141"
+        );
+        assert_eq!(websocket_host_header("ws://[::1]:4141/path"), "[::1]:4141");
+    }
+
+    #[test]
     fn websocket_headers_rewrite_beta() {
         let mut headers = http::HeaderMap::new();
         headers.insert("openai-beta", "responses=experimental".parse().unwrap());
@@ -837,6 +864,95 @@ mod tests {
 
         invalidate_codex_websocket_pool_key("test-session");
         assert!(!WS_POOL.lock().unwrap().contains_key("test-session"));
+    }
+
+    #[tokio::test]
+    async fn websocket_connect_401_is_statusful_auth_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0_u8; 2048];
+            let _ = socket.read(&mut buf).await;
+            socket
+                .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let err = match connect_with_timeout(
+            &format!("ws://{addr}/backend-api/codex/responses"),
+            &HeaderMap::new(),
+            1_000,
+        )
+        .await
+        {
+            Ok(_) => panic!("expected unauthorized websocket handshake to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.status, 401);
+        assert_eq!(err.detail, None);
+        assert_eq!(err.origin, CodexErrorOrigin::WebSocket);
+    }
+
+    #[tokio::test]
+    async fn binary_frame_invalidates_pool_key() {
+        clear_codex_websocket_pool_for_tests();
+        let pooled_stream = create_dummy_stream_async().await;
+        {
+            let mut guard = WS_POOL.lock().unwrap();
+            guard.insert(
+                "binary-session".to_string(),
+                Arc::new(PoolEntry {
+                    ws: AsyncMutex::new(pooled_stream),
+                    created_at: now_ms(),
+                }),
+            );
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            ws.send(Message::Binary(vec![1, 2, 3])).await.unwrap();
+        });
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+            .await
+            .unwrap();
+        let err = match collect_ws_events(&mut ws, 1_000, Some("binary-session"), None).await {
+            Ok(_) => panic!("expected binary frame to fail"),
+            Err(err) => err,
+        };
+
+        assert!(err.message.contains("binary frames"));
+        assert!(!WS_POOL.lock().unwrap().contains_key("binary-session"));
+    }
+
+    async fn create_dummy_stream_async() -> WebSocketStream<MaybeTlsStream<TcpStream>> {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let _ = tokio_tungstenite::accept_async(socket).await;
+            futures_util::future::pending::<()>().await;
+        });
+        let url = format!("ws://{addr}/");
+        let (ws, _) = tokio::time::timeout(
+            Duration::from_millis(1000),
+            tokio_tungstenite::connect_async(&url),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        ws
     }
 
     fn create_dummy_stream() -> WebSocketStream<MaybeTlsStream<TcpStream>> {

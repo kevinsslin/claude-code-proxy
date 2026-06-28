@@ -86,62 +86,60 @@ pub fn build_codex_headers(
     let mut headers = http::HeaderMap::new();
     headers.insert(
         http::header::CONTENT_TYPE,
-        "application/json".parse().map_err(|_| CodexError {
-            status: 500,
-            message: "Failed to parse content-type header".to_string(),
-            detail: None,
-            retry_after: None,
-            origin: CodexErrorOrigin::Http,
-        })?,
+        header_value("content-type", "application/json")?,
     );
     headers.insert(
         http::header::ACCEPT,
-        "text/event-stream".parse().map_err(|_| CodexError {
-            status: 500,
-            message: "Failed to parse accept header".to_string(),
-            detail: None,
-            retry_after: None,
-            origin: CodexErrorOrigin::Http,
-        })?,
+        header_value("accept", "text/event-stream")?,
     );
     let bearer = format!("Bearer {}", auth.access);
     headers.insert(
         http::header::AUTHORIZATION,
-        bearer.parse().map_err(|_| CodexError {
-            status: 500,
-            message: "Failed to parse authorization header".to_string(),
-            detail: None,
-            retry_after: None,
-            origin: CodexErrorOrigin::Http,
-        })?,
+        header_value("authorization", &bearer)?,
     );
     let originator = config::codex_originator(ORIGINATOR);
+    headers.insert("originator", header_value("originator", &originator)?);
     headers.insert(
-        "originator",
-        originator.parse().map_err(|_| CodexError {
-            status: 500,
-            message: "Failed to parse originator header".to_string(),
-            detail: None,
-            retry_after: None,
-            origin: CodexErrorOrigin::Http,
-        })?,
+        "openai-beta",
+        header_value("openai-beta", "responses=experimental")?,
     );
-    headers.insert("openai-beta", "responses=experimental".parse().unwrap());
     if let Some(ref account_id) = auth.account_id {
-        headers.insert("ChatGPT-Account-Id", account_id.parse().unwrap());
+        headers.insert(
+            "ChatGPT-Account-Id",
+            header_value("ChatGPT-Account-Id", account_id)?,
+        );
     }
     if let Some(ref session_id) = ctx.session_id {
-        headers.insert("session_id", session_id.parse().unwrap());
-        headers.insert("x-client-request-id", session_id.parse().unwrap());
+        headers.insert("session_id", header_value("session_id", session_id)?);
+        headers.insert(
+            "x-client-request-id",
+            header_value("x-client-request-id", session_id)?,
+        );
         let window_id = format!("{session_id}:0");
-        headers.insert("x-codex-window-id", window_id.parse().unwrap());
+        headers.insert(
+            "x-codex-window-id",
+            header_value("x-codex-window-id", &window_id)?,
+        );
     }
     let user_agent =
         config::codex_user_agent(&format!("claude-code-proxy/{}", env!("CARGO_PKG_VERSION")));
     if !user_agent.is_empty() {
-        headers.insert(http::header::USER_AGENT, user_agent.parse().unwrap());
+        headers.insert(
+            http::header::USER_AGENT,
+            header_value("user-agent", &user_agent)?,
+        );
     }
     Ok(headers)
+}
+
+fn header_value(name: &str, value: &str) -> Result<http::HeaderValue, CodexError> {
+    http::HeaderValue::from_str(value).map_err(|e| CodexError {
+        status: 500,
+        message: format!("Failed to parse {name} header"),
+        detail: Some(e.to_string()),
+        retry_after: None,
+        origin: CodexErrorOrigin::Http,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -353,24 +351,34 @@ impl CodexHttpClient {
                 }
             };
 
-            match result {
-                Ok(response) if response.status == 401 && transport_attempt == 0 => {
-                    // First 401: try refresh
-                    match self.auth_manager.force_refresh() {
-                        Ok(new_auth) => {
-                            auth = new_auth;
-                            continue;
-                        }
-                        Err(e) => {
-                            return Err(CodexError {
-                                status: 401,
-                                message: "Unauthorized".to_string(),
-                                detail: Some(e.to_string()),
-                                retry_after: None,
-                                origin: CodexErrorOrigin::Http,
-                            });
-                        }
+            if should_refresh_after_unauthorized(&result, transport_attempt) {
+                match self.auth_manager.force_refresh() {
+                    Ok(new_auth) => {
+                        auth = new_auth;
+                        continue;
                     }
+                    Err(e) => {
+                        return Err(CodexError {
+                            status: 401,
+                            message: "Unauthorized".to_string(),
+                            detail: Some(e.to_string()),
+                            retry_after: None,
+                            origin: CodexErrorOrigin::Http,
+                        });
+                    }
+                }
+            }
+
+            match result {
+                Ok(response) if response.status == 401 => {
+                    let detail = String::from_utf8_lossy(&response.body).to_string();
+                    return Err(CodexError {
+                        status: 401,
+                        message: "Unauthorized".to_string(),
+                        detail: Some(detail),
+                        retry_after: None,
+                        origin: CodexErrorOrigin::Http,
+                    });
                 }
                 Ok(response) if response.status == 403 => {
                     let detail = String::from_utf8_lossy(&response.body).to_string();
@@ -690,6 +698,19 @@ fn is_retryable_reqwest_error(err: &reqwest::Error) -> bool {
         || msg.contains("epipe")
 }
 
+fn should_refresh_after_unauthorized(
+    result: &Result<CodexResponse, CodexError>,
+    transport_attempt: u32,
+) -> bool {
+    if transport_attempt != 0 {
+        return false;
+    }
+    match result {
+        Ok(response) => response.status == 401,
+        Err(err) => err.status == 401,
+    }
+}
+
 fn websocket_pool_key<'a>(
     ctx: &'a RequestContext,
     continuation: Option<&super::continuation::ContinuationCandidate>,
@@ -770,6 +791,26 @@ mod tests {
         let headers = build_codex_headers(&auth, &ctx).unwrap();
         assert!(headers.get("session_id").is_none());
         assert!(headers.get("x-client-request-id").is_none());
+    }
+
+    #[test]
+    fn codex_headers_return_error_for_invalid_session_header() {
+        let auth = StoredAuth {
+            access: "tok".into(),
+            refresh: String::new(),
+            account_id: None,
+            expires: u64::MAX,
+        };
+        let ctx = RequestContext {
+            req_id: "r".into(),
+            session_id: Some("bad\nsession".into()),
+            session_seq: None,
+            provider: "codex".into(),
+            traffic: None,
+        };
+        let err = build_codex_headers(&auth, &ctx).unwrap_err();
+        assert_eq!(err.status, 500);
+        assert!(err.message.contains("session_id"));
     }
 
     #[test]
@@ -909,5 +950,36 @@ mod tests {
         };
         let display = format!("{err}");
         assert!(display.contains("connection reset"));
+    }
+
+    #[test]
+    fn unauthorized_retry_check_covers_http_and_websocket_results() {
+        let http_unauthorized = Ok(CodexResponse {
+            body: Vec::new(),
+            status: 401,
+            headers: Vec::new(),
+        });
+        let websocket_unauthorized = Err(CodexError {
+            status: 401,
+            message: "WebSocket connect error".to_string(),
+            detail: None,
+            retry_after: None,
+            origin: CodexErrorOrigin::WebSocket,
+        });
+        let forbidden = Err(CodexError {
+            status: 403,
+            message: "Forbidden".to_string(),
+            detail: None,
+            retry_after: None,
+            origin: CodexErrorOrigin::WebSocket,
+        });
+
+        assert!(should_refresh_after_unauthorized(&http_unauthorized, 0));
+        assert!(should_refresh_after_unauthorized(
+            &websocket_unauthorized,
+            0
+        ));
+        assert!(!should_refresh_after_unauthorized(&forbidden, 0));
+        assert!(!should_refresh_after_unauthorized(&http_unauthorized, 1));
     }
 }
