@@ -159,9 +159,10 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorS
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
-            Constraint::Percentage(40),
+            Constraint::Percentage(30),
+            Constraint::Percentage(20),
             Constraint::Percentage(25),
-            Constraint::Percentage(35),
+            Constraint::Percentage(25),
             Constraint::Length(1),
         ])
         .split(area);
@@ -174,7 +175,8 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorS
     }
     render_active(frame, root[2], &state.active, app.tick);
     render_recent(frame, root[3], &state.recent);
-    render_footer(frame, root[4], app);
+    render_events(frame, root[4], &state.recent);
+    render_footer(frame, root[5], app);
 
     if app.show_setup {
         render_setup_overlay(frame, area, &app.setup_text);
@@ -531,6 +533,55 @@ fn render_recent(frame: &mut ratatui::Frame<'_>, area: Rect, recent: &[Completed
         ("details", Alignment::Left),
     ]))
     .block(panel("Recent requests", false));
+    frame.render_widget(table, area);
+}
+
+fn render_events(frame: &mut ratatui::Frame<'_>, area: Rect, recent: &[CompletedRequest]) {
+    let rows = recent
+        .iter()
+        .filter(|request| {
+            request.status == crate::monitor::RequestStatus::Failed
+                || request.http_status.is_some_and(|status| status >= 400)
+                || request.error.is_some()
+        })
+        .take(12)
+        .map(|request| {
+            let status = request
+                .http_status
+                .map(|status| status.to_string())
+                .unwrap_or_else(|| request.status.label().to_string());
+            let message = request
+                .error
+                .as_deref()
+                .filter(|error| !error.is_empty())
+                .unwrap_or("-");
+            Row::new(vec![
+                muted_cell(format_system_time(request.finished_at)),
+                Cell::from(Span::styled(status, http_status_style(request.http_status))),
+                provider_cell(request.provider.as_deref()),
+                text_cell(request.model.as_deref().unwrap_or("-")),
+                detail_cell(message),
+            ])
+            .style(Style::default().bg(PANEL_BG))
+        });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(8),
+            Constraint::Length(6),
+            Constraint::Length(10),
+            Constraint::Min(18),
+            Constraint::Percentage(50),
+        ],
+    )
+    .header(table_header_aligned([
+        ("time", Alignment::Left),
+        ("status", Alignment::Left),
+        ("provider", Alignment::Left),
+        ("model", Alignment::Left),
+        ("message", Alignment::Left),
+    ]))
+    .block(panel("Events", false));
     frame.render_widget(table, area);
 }
 
