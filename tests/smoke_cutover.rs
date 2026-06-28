@@ -443,6 +443,7 @@ async fn smoke_codex_http_traffic_capture_writes_upstream_artifacts() {
         concat!(
             "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_up\"}}\n\n",
             "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"codex http ok\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\n",
             "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n"
         )
         .as_bytes()
@@ -476,6 +477,88 @@ async fn smoke_codex_http_traffic_capture_writes_upstream_artifacts() {
     );
     traffic_file(&files, "032-upstream-response-body.sse");
     traffic_file(&files, "040-upstream-event.json");
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn smoke_codex_http_stream_traffic_captures_downstream_events() {
+    let _guard = env_lock();
+    let config = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    write_auth(config.path(), "codex");
+
+    let upstream = spawn_http_upstream(|_body: Value| {
+        concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_up\"}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"codex stream ok\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}}\n\n"
+        )
+        .as_bytes()
+        .to_vec()
+    })
+    .await;
+
+    let _traffic_env = EnvGuard::set("CCP_TRAFFIC_LOG", "1");
+    let _state_env = EnvGuard::set("XDG_STATE_HOME", state.path());
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let response = call_messages_body(json!({
+        "model": "gpt-5.5",
+        "max_tokens": 64,
+        "stream": true,
+        "messages": [{"role":"user","content":"hello"}]
+    }))
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("message_stop"), "stream body: {text}");
+
+    let files = traffic_files(state.path());
+    let downstream = traffic_json(&files, "050-downstream-event.json");
+    assert!(downstream.get("event").is_some());
+    assert!(downstream.get("data").is_some());
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn smoke_codex_http_truncated_upstream_writes_reducer_diagnostic() {
+    let _guard = env_lock();
+    let config = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    write_auth(config.path(), "codex");
+
+    let upstream = spawn_http_upstream(|_body: Value| {
+        concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_up\"}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"partial\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\n"
+        )
+        .as_bytes()
+        .to_vec()
+    })
+    .await;
+
+    let _traffic_env = EnvGuard::set("CCP_TRAFFIC_LOG", "1");
+    let _state_env = EnvGuard::set("XDG_STATE_HOME", state.path());
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let response = call_messages("gpt-5.5").await;
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let files = traffic_files(state.path());
+    let diagnostic = traffic_json(&files, "060-codex-reducer-error.json");
+    assert_eq!(diagnostic["kind"], "Transient");
+    assert_eq!(
+        diagnostic["diagnostics"]["saw_terminal_event"],
+        Value::Bool(false)
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -1,7 +1,10 @@
 use serde_json::Value;
 
+use crate::traffic::TrafficCapture;
+
 use super::reducer::{
-    AnthropicUsage, ReducerEvent, map_codex_usage_to_anthropic, reduce_upstream_bytes,
+    AnthropicUsage, ReducerEvent, UpstreamStreamError, map_codex_usage_to_anthropic,
+    reduce_upstream_bytes,
 };
 use super::web_search_compat::{WebSearchCompatContent, build_web_search_compat_blocks};
 
@@ -10,8 +13,26 @@ pub fn accumulate_response(
     message_id: &str,
     model: &str,
 ) -> Result<Value, anyhow::Error> {
-    let events = reduce_upstream_bytes(upstream)
-        .map_err(|e| anyhow::anyhow!("upstream error: {} ({:?})", e.message, e.kind))?;
+    accumulate_response_with_traffic(upstream, message_id, model, None)
+}
+
+pub fn accumulate_response_with_traffic(
+    upstream: &[u8],
+    message_id: &str,
+    model: &str,
+    traffic: Option<&TrafficCapture>,
+) -> Result<Value, anyhow::Error> {
+    let events = match reduce_upstream_bytes(upstream) {
+        Ok(events) => events,
+        Err(err) => {
+            write_reducer_error_capture(traffic, &err);
+            return Err(anyhow::anyhow!(
+                "upstream error: {} ({:?})",
+                err.message,
+                err.kind
+            ));
+        }
+    };
 
     let mut blocks: Vec<AccumulatedBlock> = Vec::new();
     let mut stop_reason: Option<String> = None;
@@ -170,6 +191,21 @@ pub fn accumulate_response(
     Ok(response)
 }
 
+fn write_reducer_error_capture(traffic: Option<&TrafficCapture>, err: &UpstreamStreamError) {
+    let Some(traffic) = traffic else {
+        return;
+    };
+    traffic.write_json(
+        "060-codex-reducer-error",
+        &serde_json::json!({
+            "kind": format!("{:?}", err.kind),
+            "message": err.message,
+            "retryAfterSeconds": err.retry_after_seconds,
+            "diagnostics": err.diagnostics,
+        }),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,7 +300,7 @@ mod tests {
     #[test]
     fn accumulate_web_search_response() {
         let upstream = format!(
-            "{}{}{}{}{}{}{}",
+            "{}{}{}{}{}{}{}{}",
             sse_event(
                 "response.output_item.added",
                 json!({
@@ -308,6 +344,12 @@ mod tests {
                 "response.output_item.done",
                 json!({
                     "output_index":1,"item":{"type":"message"}
+                })
+            ),
+            sse_event(
+                "response.completed",
+                json!({
+                    "response":{"id":"resp_1","usage":{"input_tokens":3,"output_tokens":1}}
                 })
             ),
         );

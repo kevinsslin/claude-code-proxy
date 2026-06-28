@@ -7,6 +7,7 @@ pub struct UpstreamStreamError {
     pub kind: UpstreamErrorKind,
     pub message: String,
     pub retry_after_seconds: Option<u64>,
+    pub diagnostics: Option<UpstreamStreamDiagnostics>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +16,29 @@ pub enum UpstreamErrorKind {
     Overloaded,
     Transient,
     Failed,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct UpstreamStreamDiagnostics {
+    pub event_count: usize,
+    pub last_event_type: Option<String>,
+    pub saw_terminal_event: bool,
+    pub open_blocks: Vec<OpenBlockDiagnostic>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OpenBlockDiagnostic {
+    pub output_index: usize,
+    pub anthropic_index: usize,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_bytes: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub argument_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -87,6 +111,24 @@ pub struct FinishMetadata {
     pub output_items: Vec<ResponsesInputItem>,
 }
 
+enum BlockState {
+    Text {
+        index: usize,
+        text_accum: String,
+    },
+    Tool {
+        index: usize,
+        #[allow(dead_code)]
+        output_index: usize,
+        call_id: String,
+        name: String,
+        args_accum: String,
+        had_delta: bool,
+        buffer_until_done: bool,
+        emitted_args: bool,
+    },
+}
+
 pub fn finish_metadata_from_upstream(
     input: &[u8],
 ) -> Result<Option<FinishMetadata>, UpstreamStreamError> {
@@ -125,24 +167,8 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
     let mut incomplete = false;
     let mut web_search_requests = 0usize;
     let mut _saw_terminal = false;
-
-    enum BlockState {
-        Text {
-            index: usize,
-            text_accum: String,
-        },
-        Tool {
-            index: usize,
-            #[allow(dead_code)]
-            output_index: usize,
-            call_id: String,
-            name: String,
-            args_accum: String,
-            had_delta: bool,
-            buffer_until_done: bool,
-            emitted_args: bool,
-        },
-    }
+    let mut event_count = 0usize;
+    let mut last_event_type: Option<String> = None;
 
     fn capture_output_item(
         output_index: usize,
@@ -201,6 +227,8 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        event_count += 1;
+        last_event_type = Some(t.clone());
 
         if t == "codex.rate_limits" {
             if let Some(true) = p
@@ -217,6 +245,7 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
                     kind: UpstreamErrorKind::RateLimit,
                     message: "rate limit reached".to_string(),
                     retry_after_seconds: retry_after.map(|f| f as u64),
+                    diagnostics: None,
                 });
             }
             out.push(ReducerEvent::Progress);
@@ -254,6 +283,7 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
                 kind,
                 message: msg.to_string(),
                 retry_after_seconds: retry_after,
+                diagnostics: None,
             });
         }
 
@@ -547,6 +577,26 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
         }
     }
 
+    let open_blocks = describe_open_blocks(&blocks_by_output_index);
+    if !_saw_terminal || !open_blocks.is_empty() {
+        let diagnostics = UpstreamStreamDiagnostics {
+            event_count,
+            last_event_type,
+            saw_terminal_event: _saw_terminal,
+            open_blocks,
+        };
+        return Err(UpstreamStreamError {
+            kind: UpstreamErrorKind::Transient,
+            message: if diagnostics.saw_terminal_event {
+                "upstream stream ended with open Codex output blocks".to_string()
+            } else {
+                "upstream stream ended before terminal Codex response event".to_string()
+            },
+            retry_after_seconds: None,
+            diagnostics: Some(diagnostics),
+        });
+    }
+
     let stop_reason: StopReason = if incomplete {
         STOP_MAX_TOKENS
     } else if saw_tool_use {
@@ -568,6 +618,42 @@ pub fn reduce_upstream_bytes(input: &[u8]) -> Result<Vec<ReducerEvent>, Upstream
     });
 
     Ok(out)
+}
+
+fn describe_open_blocks(
+    blocks: &std::collections::HashMap<usize, BlockState>,
+) -> Vec<OpenBlockDiagnostic> {
+    let mut out: Vec<_> = blocks
+        .iter()
+        .map(|(output_index, state)| match state {
+            BlockState::Text { index, text_accum } => OpenBlockDiagnostic {
+                output_index: *output_index,
+                anthropic_index: *index,
+                kind: "text".to_string(),
+                name: None,
+                call_id: None,
+                text_bytes: Some(text_accum.len()),
+                argument_bytes: None,
+            },
+            BlockState::Tool {
+                index,
+                call_id,
+                name,
+                args_accum,
+                ..
+            } => OpenBlockDiagnostic {
+                output_index: *output_index,
+                anthropic_index: *index,
+                kind: "tool".to_string(),
+                name: Some(name.clone()),
+                call_id: Some(call_id.clone()),
+                text_bytes: None,
+                argument_bytes: Some(args_accum.len()),
+            },
+        })
+        .collect();
+    out.sort_by_key(|block| block.output_index);
+    out
 }
 
 fn parse_codex_usage(response: &serde_json::Value) -> CodexUsage {
@@ -837,7 +923,7 @@ mod tests {
     #[test]
     fn reduce_tool_use_response() {
         let upstream = format!(
-            "{}{}{}{}",
+            "{}{}{}{}{}",
             sse(
                 "response.output_item.added",
                 json!({
@@ -862,6 +948,12 @@ mod tests {
                 json!({
                     "output_index":0,
                     "item":{"type":"function_call","call_id":"call_1","name":"Read","arguments":"{\"file_path\":\"/tmp/a\"}"}
+                })
+            ),
+            sse(
+                "response.completed",
+                json!({
+                    "response":{"id":"resp_1","usage":{}}
                 })
             ),
         );
@@ -955,6 +1047,35 @@ mod tests {
         } else {
             panic!("expected Finish");
         }
+    }
+
+    #[test]
+    fn reduce_missing_terminal_is_error() {
+        let upstream = format!(
+            "{}{}{}",
+            sse(
+                "response.output_item.added",
+                json!({
+                    "output_index": 0,
+                    "item": {"type":"message","id":"msg_up"}
+                })
+            ),
+            sse(
+                "response.output_text.delta",
+                json!({
+                    "output_index":0,"delta":"partial"
+                })
+            ),
+            sse(
+                "response.output_item.done",
+                json!({
+                    "output_index":0,"item":{"type":"message"}
+                })
+            ),
+        );
+        let err = reduce_upstream_bytes(upstream.as_bytes()).unwrap_err();
+        assert_eq!(err.kind, UpstreamErrorKind::Transient);
+        assert!(err.message.contains("terminal"));
     }
 
     #[test]

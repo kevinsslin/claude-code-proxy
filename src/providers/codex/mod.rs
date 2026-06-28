@@ -25,11 +25,11 @@ use self::auth::token_store::file_store;
 use self::client::CodexHttpClient;
 use self::continuation::{clear_continuation, continuation_candidate, record_continuation};
 use self::count_tokens::count_translated_tokens;
-use self::translate::accumulate::accumulate_response;
+use self::translate::accumulate::accumulate_response_with_traffic;
 use self::translate::model_allowlist::{assert_allowed_model, resolve_model_request};
 use self::translate::reducer::finish_metadata_from_upstream;
 use self::translate::request::{TranslateOptions, translate_request};
-use self::translate::stream::translate_stream_bytes;
+use self::translate::stream::translate_stream_bytes_with_traffic;
 
 // ---------------------------------------------------------------------------
 // Provider
@@ -128,7 +128,12 @@ impl Provider for CodexProvider {
         };
 
         if want_stream {
-            let sse_bytes = match translate_stream_bytes(&upstream.body, &message_id, model) {
+            let sse_bytes = match translate_stream_bytes_with_traffic(
+                &upstream.body,
+                &message_id,
+                model,
+                ctx.traffic.as_deref(),
+            ) {
                 Ok(b) => b,
                 Err(e) => {
                     clear_continuation(ctx.session_id.as_deref());
@@ -152,7 +157,12 @@ impl Provider for CodexProvider {
             ];
             (headers, sse_bytes).into_response()
         } else {
-            match accumulate_response(&upstream.body, &message_id, model) {
+            match accumulate_response_with_traffic(
+                &upstream.body,
+                &message_id,
+                model,
+                ctx.traffic.as_deref(),
+            ) {
                 Ok(json) => {
                     update_continuation_from_upstream(
                         ctx.session_id.as_deref(),
