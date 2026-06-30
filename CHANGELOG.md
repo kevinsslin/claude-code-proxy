@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Codex reasoning summaries are requested with `reasoning.summary: "auto"` when
+  reasoning effort is enabled and are rendered as Anthropic `thinking` blocks
+  when Codex emits summary events.
+- `codex.reasoningSummary` and `CCP_CODEX_REASONING_SUMMARY` control Codex
+  reasoning summaries; `off` and `none` suppress summary display while keeping
+  reasoning effort and encrypted continuation content.
+
 ## v0.1.0 (2026-06-30)
 
 - Ships the native Rust implementation as the release binary and removes the
