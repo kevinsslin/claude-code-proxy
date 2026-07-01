@@ -2,26 +2,14 @@
 
 ## Unreleased
 
-- Codex WebSocket streaming requests forward Anthropic SSE chunks as upstream
-  events arrive, so long compaction responses show progress before the terminal
-  Codex event.
-- Codex WebSocket streaming requests return structured JSON for upstream errors
-  that arrive before any downstream SSE chunk, preserving diagnostics such as
-  context-window failures.
-- Codex WebSocket live streaming reuses pooled session sockets and applies
-  `previous_response_id` continuations on append-only turns, reducing repeated
-  upstream input for streaming sessions.
-- Codex WebSocket requests use the gateway-compatible request shape, so
-  `claude -p` jobs and release changelog generation avoid unsupported-parameter
-  failures.
-- Codex WebSocket streaming responses report completed turns as `end_turn`
-  when the gateway sends `incomplete_details: null`, preventing false output
-  limit recovery loops in Claude Code.
-- Codex WebSocket live streaming matches the TypeScript fallback behavior for
-  retryable startup failures, completed tool-call disconnects, SSE error
-  framing, buffered `Read` argument repair, and longer quiet upstream turns.
-- Codex tool result translation preserves omitted-block markers for malformed
-  text and image result content, keeping unsupported tool output visible.
+- Codex WebSocket streams deliver live text and reasoning progress while reusing
+  pooled session continuations to reduce repeated upstream input.
+- Codex stream recovery handles retryable startup failures, context-window
+  errors, stale continuations, completed tool-call disconnects, stalled `Read`
+  arguments, quiet upstream turns, and completed-turn stop reasons.
+- Codex gateway requests and tool result translation use accepted payload shapes
+  and preserve omitted-block markers for malformed text and image result
+  content.
 
 ## v0.1.2 (2026-06-30)
 
