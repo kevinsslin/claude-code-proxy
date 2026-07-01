@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.1.4 (2026-07-01)
 
-- Codex WebSocket streams retry continued turns with full context when a pooled
-  upstream socket closes before any terminal response event.
+- Codex WebSocket streams recover when a pooled continuation connection closes
+  before the final response, retrying the turn with full context instead of
+  failing the session.
 
 ## v0.1.3 (2026-07-01)
 
