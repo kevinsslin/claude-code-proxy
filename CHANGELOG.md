@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.1.8 (2026-07-09)
+
+- Codex requests can use `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`,
+  including `-fast` variants.
+- The default Codex setup uses `gpt-5.6-sol` with `gpt-5.6-luna` as the small
+  fast model and a 372K compaction window.
+
 ## v0.1.7 (2026-07-06)
 
 - Codex `Read` tool calls get clearer offset guidance and recover from clearly
