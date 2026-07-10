@@ -37,6 +37,53 @@ const YELLOW: Color = Color::Rgb(220, 200, 100);
 const BLUE: Color = Color::Rgb(120, 170, 230);
 const DIM: Color = Color::Rgb(100, 104, 114);
 
+const SESSION_TABLE_HEADERS: [(&str, Alignment); 12] = [
+    ("", Alignment::Left),
+    ("ID", Alignment::Left),
+    ("Active", Alignment::Right),
+    ("Reqs", Alignment::Right),
+    ("Fail", Alignment::Right),
+    ("Provider", Alignment::Left),
+    ("Model", Alignment::Left),
+    ("Effort", Alignment::Left),
+    ("In", Alignment::Right),
+    ("Out", Alignment::Right),
+    ("Rate", Alignment::Right),
+    ("Status", Alignment::Left),
+];
+
+const ACTIVE_TABLE_HEADERS: [(&str, Alignment); 8] = [
+    ("Started", Alignment::Left),
+    ("Provider", Alignment::Left),
+    ("Model", Alignment::Left),
+    ("Effort", Alignment::Left),
+    ("Endpoint", Alignment::Left),
+    ("Status", Alignment::Left),
+    ("Rate", Alignment::Left),
+    ("Elapsed", Alignment::Right),
+];
+
+const RECENT_TABLE_HEADERS: [(&str, Alignment); 10] = [
+    ("Finished", Alignment::Left),
+    ("Status", Alignment::Left),
+    ("Provider", Alignment::Left),
+    ("Model", Alignment::Left),
+    ("Effort", Alignment::Left),
+    ("Latency", Alignment::Right),
+    ("Rate", Alignment::Right),
+    ("In", Alignment::Right),
+    ("Out", Alignment::Right),
+    ("Details", Alignment::Left),
+];
+
+const EVENTS_TABLE_HEADERS: [(&str, Alignment); 5] = [
+    ("Time", Alignment::Left),
+    ("Status", Alignment::Left),
+    ("Provider", Alignment::Left),
+    ("Model", Alignment::Left),
+    ("Message", Alignment::Left),
+];
+
 pub struct MonitorUiConfig<'a> {
     pub port: u16,
     pub registry: &'a Registry,
@@ -339,6 +386,18 @@ fn ellipsize(value: &str, width: usize) -> String {
         .collect()
 }
 
+fn display_session_id(session_id: Option<&str>) -> &str {
+    let Some(session_id) = session_id.filter(|value| !value.is_empty()) else {
+        return "no-session";
+    };
+    if uuid::Uuid::parse_str(session_id).is_ok() {
+        return session_id
+            .split_once('-')
+            .map_or(session_id, |(first, _)| first);
+    }
+    session_id
+}
+
 fn number_cell(value: impl Into<String>) -> Cell<'static> {
     Cell::from(
         Line::from(Span::styled(value.into(), Style::default().fg(DIM_WHITE)))
@@ -451,7 +510,7 @@ fn render_sessions(
 
     let widths = [
         Constraint::Length(1),
-        Constraint::Length(36),
+        Constraint::Length(8),
         Constraint::Length(6),
         Constraint::Length(5),
         Constraint::Length(5),
@@ -468,7 +527,7 @@ fn render_sessions(
         let marker = if index == selected { ">" } else { " " };
         Row::new(vec![
             Cell::from(Span::styled(marker, Style::default().fg(TEAL))),
-            text_cell(session.label()),
+            text_cell(display_session_id(session.session_id.as_deref())),
             number_cell(session.active_count.to_string()),
             number_cell(session.request_count.to_string()),
             number_cell(session.failure_count.to_string()),
@@ -487,20 +546,7 @@ fn render_sessions(
         })
     });
     let table = Table::new(rows, widths)
-        .header(table_header_aligned([
-            ("", Alignment::Left),
-            ("session", Alignment::Left),
-            ("active", Alignment::Right),
-            ("reqs", Alignment::Right),
-            ("fail", Alignment::Right),
-            ("provider", Alignment::Left),
-            ("model", Alignment::Left),
-            ("effort", Alignment::Left),
-            ("in", Alignment::Right),
-            ("out", Alignment::Right),
-            ("rate", Alignment::Right),
-            ("status", Alignment::Left),
-        ]))
+        .header(table_header_aligned(SESSION_TABLE_HEADERS))
         .block(panel("Sessions", true));
     frame.render_widget(table, area);
 }
@@ -549,16 +595,7 @@ fn render_active(
         .style(Style::default().bg(PANEL_BG))
     });
     let table = Table::new(rows, widths)
-        .header(table_header_aligned([
-            ("started", Alignment::Left),
-            ("provider", Alignment::Left),
-            ("model", Alignment::Left),
-            ("effort", Alignment::Left),
-            ("endpoint", Alignment::Left),
-            ("status", Alignment::Left),
-            ("rate", Alignment::Left),
-            ("elapsed", Alignment::Right),
-        ]))
+        .header(table_header_aligned(ACTIVE_TABLE_HEADERS))
         .block(panel("Active requests", false));
     frame.render_widget(table, area);
 }
@@ -604,18 +641,7 @@ fn render_recent(frame: &mut ratatui::Frame<'_>, area: Rect, recent: &[Completed
         .style(Style::default().bg(PANEL_BG))
     });
     let table = Table::new(rows, widths)
-        .header(table_header_aligned([
-            ("finished", Alignment::Left),
-            ("status", Alignment::Left),
-            ("provider", Alignment::Left),
-            ("model", Alignment::Left),
-            ("effort", Alignment::Left),
-            ("latency", Alignment::Right),
-            ("rate", Alignment::Right),
-            ("in", Alignment::Right),
-            ("out", Alignment::Right),
-            ("details", Alignment::Left),
-        ]))
+        .header(table_header_aligned(RECENT_TABLE_HEADERS))
         .block(panel("Recent requests", false));
     frame.render_widget(table, area);
 }
@@ -663,13 +689,7 @@ fn render_events(frame: &mut ratatui::Frame<'_>, area: Rect, recent: &[Completed
         .style(Style::default().bg(PANEL_BG))
     });
     let table = Table::new(rows, widths)
-        .header(table_header_aligned([
-            ("time", Alignment::Left),
-            ("status", Alignment::Left),
-            ("provider", Alignment::Left),
-            ("model", Alignment::Left),
-            ("message", Alignment::Left),
-        ]))
+        .header(table_header_aligned(EVENTS_TABLE_HEADERS))
         .block(panel("Events", false));
     frame.render_widget(table, area);
 }
@@ -958,6 +978,55 @@ mod tests {
             .saturating_sub(x + placeholder.chars().count() as u16 + 1);
         assert_eq!(y, expected_y);
         assert!(left_space.abs_diff(right_space) <= 1);
+    }
+
+    fn table_header_labels<'a, const N: usize>(
+        headers: &'a [(&'a str, Alignment); N],
+    ) -> [&'a str; N] {
+        headers.map(|(label, _)| label)
+    }
+
+    #[test]
+    fn table_headers_use_expected_labels() {
+        assert_eq!(
+            table_header_labels(&SESSION_TABLE_HEADERS),
+            [
+                "", "ID", "Active", "Reqs", "Fail", "Provider", "Model", "Effort", "In", "Out",
+                "Rate", "Status",
+            ]
+        );
+        assert_eq!(
+            table_header_labels(&ACTIVE_TABLE_HEADERS),
+            [
+                "Started", "Provider", "Model", "Effort", "Endpoint", "Status", "Rate", "Elapsed",
+            ]
+        );
+        assert_eq!(
+            table_header_labels(&RECENT_TABLE_HEADERS),
+            [
+                "Finished", "Status", "Provider", "Model", "Effort", "Latency", "Rate", "In",
+                "Out", "Details",
+            ]
+        );
+        assert_eq!(
+            table_header_labels(&EVENTS_TABLE_HEADERS),
+            ["Time", "Status", "Provider", "Model", "Message"]
+        );
+    }
+
+    #[test]
+    fn display_session_id_shortens_uuids() {
+        assert_eq!(
+            display_session_id(Some("57c7c914-ada4-4f40-9672-985f950fbb66")),
+            "57c7c914"
+        );
+    }
+
+    #[test]
+    fn display_session_id_handles_atypical_ids() {
+        assert_eq!(display_session_id(Some("custom-session")), "custom-session");
+        assert_eq!(display_session_id(Some("")), "no-session");
+        assert_eq!(display_session_id(None), "no-session");
     }
 
     #[test]
