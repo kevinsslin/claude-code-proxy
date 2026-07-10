@@ -442,7 +442,7 @@ impl MonitorStore {
             MonitorEvent::ModelResolved { request_id, model } => {
                 if let Some(active) = self.active.get_mut(&request_id) {
                     active.model = Some(match active.model.take() {
-                        Some(incoming) if incoming != model => format!("{incoming} -> {model}"),
+                        Some(incoming) if incoming != model => format!("{incoming} → {model}"),
                         Some(incoming) => incoming,
                         None => model,
                     });
@@ -796,7 +796,7 @@ mod tests {
         let state = monitor.snapshot();
         assert_eq!(
             state.active[0].model.as_deref(),
-            Some("claude-sonnet-4-6 -> gpt-5.4")
+            Some("claude-sonnet-4-6 → gpt-5.4")
         );
     }
 

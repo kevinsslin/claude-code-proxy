@@ -469,12 +469,13 @@ fn translate_live_stream_payload(
 
 fn record_live_stream_progress(ctx: &RequestContext, chunk: &[u8]) {
     if let Some(monitor) = ctx.monitor.as_ref() {
+        let (input_tokens, output_tokens) = usage_from_anthropic_sse(chunk);
         monitor.stream_progress(
             &ctx.req_id,
             chunk.len() as u64,
             count_sse_events(chunk),
-            None,
-            None,
+            input_tokens,
+            output_tokens,
         );
     }
 }
@@ -970,6 +971,32 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn live_stream_progress_records_terminal_usage() {
+        let monitor = crate::monitor::MonitorHandle::new(10);
+        monitor.request_started(
+            "request",
+            None,
+            None,
+            crate::monitor::EndpointKind::Messages,
+        );
+        let ctx = RequestContext {
+            req_id: "request".to_string(),
+            session_id: None,
+            session_seq: None,
+            provider: "codex".to_string(),
+            traffic: None,
+            monitor: Some(monitor.clone()),
+        };
+        let chunk = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":12,\"output_tokens\":48}}\n\n";
+
+        record_live_stream_progress(&ctx, chunk);
+
+        let state = monitor.snapshot();
+        assert_eq!(state.active[0].input_tokens, Some(12));
+        assert_eq!(state.active[0].output_tokens, Some(48));
     }
 
     #[test]
