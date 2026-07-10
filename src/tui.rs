@@ -36,6 +36,7 @@ const RED: Color = Color::Rgb(220, 120, 120);
 const YELLOW: Color = Color::Rgb(220, 200, 100);
 const BLUE: Color = Color::Rgb(120, 170, 230);
 const DIM: Color = Color::Rgb(100, 104, 114);
+const RECENT_MODEL_WIDTH: u16 = 36;
 
 const SESSION_TABLE_HEADERS: [(&str, Alignment); 12] = [
     ("", Alignment::Left),
@@ -59,7 +60,7 @@ const ACTIVE_TABLE_HEADERS: [(&str, Alignment); 8] = [
     ("Effort", Alignment::Left),
     ("Endpoint", Alignment::Left),
     ("Status", Alignment::Left),
-    ("Rate", Alignment::Left),
+    ("Rate", Alignment::Right),
     ("Elapsed", Alignment::Right),
 ];
 
@@ -447,17 +448,6 @@ fn rate_cell(value: String) -> Cell<'static> {
     )
 }
 
-fn left_rate_cell(value: String) -> Cell<'static> {
-    let color = if value.contains("tok/s") {
-        TEAL
-    } else if value == "-" {
-        DIM
-    } else {
-        DIM_WHITE
-    };
-    Cell::from(Span::styled(value, Style::default().fg(color)))
-}
-
 fn provider_cell(value: Option<&str>) -> Cell<'static> {
     let value = value.unwrap_or("-");
     let color = match value {
@@ -589,7 +579,7 @@ fn render_active(
             text_cell(request.effort.as_deref().unwrap_or("-")),
             muted_cell(request.endpoint.label()),
             Cell::from(Span::styled(status, status_style(request.status.label()))),
-            left_rate_cell(request.rate().label()),
+            rate_cell(request.rate().label()),
             number_cell(format_duration(request.elapsed())),
         ])
         .style(Style::default().bg(PANEL_BG))
@@ -610,7 +600,7 @@ fn render_recent(frame: &mut ratatui::Frame<'_>, area: Rect, recent: &[Completed
         Constraint::Length(8),
         Constraint::Length(6),
         Constraint::Length(8),
-        Constraint::Fill(2),
+        Constraint::Length(RECENT_MODEL_WIDTH),
         Constraint::Length(7),
         Constraint::Length(8),
         Constraint::Length(12),
@@ -1012,6 +1002,8 @@ mod tests {
             table_header_labels(&EVENTS_TABLE_HEADERS),
             ["Time", "Status", "Provider", "Model", "Message"]
         );
+        assert_eq!(ACTIVE_TABLE_HEADERS[6], ("Rate", Alignment::Right));
+        assert_eq!(RECENT_TABLE_HEADERS[6], ("Rate", Alignment::Right));
     }
 
     #[test]
@@ -1035,7 +1027,7 @@ mod tests {
             Constraint::Length(8),
             Constraint::Length(6),
             Constraint::Length(8),
-            Constraint::Fill(2),
+            Constraint::Length(RECENT_MODEL_WIDTH),
             Constraint::Length(7),
             Constraint::Length(8),
             Constraint::Length(12),
@@ -1047,6 +1039,13 @@ mod tests {
         assert_eq!(table_column_width(Rect::new(0, 0, 90, 10), &widths, 6), 12);
         assert_eq!(table_column_width(Rect::new(0, 0, 90, 10), &widths, 7), 7);
         assert_eq!(table_column_width(Rect::new(0, 0, 90, 10), &widths, 8), 7);
+        assert_eq!(
+            table_column_width(Rect::new(0, 0, 200, 10), &widths, 3),
+            usize::from(RECENT_MODEL_WIDTH)
+        );
+        assert!(
+            usize::from(RECENT_MODEL_WIDTH) >= "claude-sonnet-4-6 → gpt-5.6-terra".chars().count()
+        );
     }
 
     #[test]
