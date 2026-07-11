@@ -687,26 +687,25 @@ async fn connect_with_timeout(
             origin: CodexErrorOrigin::WebSocket,
         })?
         .map_err(|e| {
-            let msg = e.to_string();
-            // Map auth failures to proper status codes
-            let status = if msg.contains("401") || msg.contains("Unauthorized") {
-                Some(401u16)
-            } else if msg.contains("403") || msg.contains("Forbidden") {
-                Some(403u16)
-            } else if msg.contains("429") || msg.contains("Rate") {
-                Some(429u16)
-            } else {
-                None
+            let (status, retry_after) = match &e {
+                tungstenite::Error::Http(response) => (
+                    Some(response.status().as_u16()),
+                    response
+                        .headers()
+                        .get(http::header::RETRY_AFTER)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string),
+                ),
+                _ => (None, None),
             };
             CodexError {
                 status: status.unwrap_or(0),
                 message: format!("WebSocket connect error: {e}"),
-                detail: if status.is_none() {
-                    Some("websocket_pre_request".to_string())
-                } else {
-                    None
+                detail: match status {
+                    Some(401 | 403) => None,
+                    _ => Some("websocket_pre_request".to_string()),
                 },
-                retry_after: None,
+                retry_after,
                 origin: CodexErrorOrigin::WebSocket,
             }
         })
@@ -1277,6 +1276,42 @@ mod tests {
 
         assert_eq!(err.status, 401);
         assert_eq!(err.detail, None);
+        assert_eq!(err.origin, CodexErrorOrigin::WebSocket);
+    }
+
+    #[tokio::test]
+    async fn websocket_connect_502_preserves_retry_metadata() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0_u8; 2048];
+            let _ = socket.read(&mut buf).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 502 Bad Gateway\r\nRetry-After: 3\r\nContent-Length: 0\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let err = match connect_with_timeout(
+            &format!("ws://{addr}/backend-api/codex/responses"),
+            &HeaderMap::new(),
+            1_000,
+        )
+        .await
+        {
+            Ok(_) => panic!("expected websocket handshake to fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.status, 502);
+        assert_eq!(err.detail.as_deref(), Some("websocket_pre_request"));
+        assert_eq!(err.retry_after.as_deref(), Some("3"));
         assert_eq!(err.origin, CodexErrorOrigin::WebSocket);
     }
 

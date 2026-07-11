@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use crate::anthropic::sse::parse_sse_events;
 use crate::config;
 use crate::provider::RequestContext;
-use crate::retry::{compute_backoff_delay, sleep};
+use crate::retry::{compute_backoff_delay, should_retry_status, sleep};
 use crate::traffic::TrafficCapture;
 
 use super::auth::constants::{CODEX_API_ENDPOINT, ORIGINATOR, RESPONSES_LITE_ORIGINATOR};
@@ -482,7 +482,8 @@ impl CodexHttpClient {
                     // Determine if retryable
                     let retryable = is_retryable_transport_error(&err);
                     if retryable && transport_attempt < 3 {
-                        let delay = compute_backoff_delay(transport_attempt, None);
+                        let delay =
+                            compute_backoff_delay(transport_attempt, err.retry_after.as_deref());
                         sleep(delay.wait_ms).await;
                         continue;
                     }
@@ -801,14 +802,15 @@ fn summarize_json_request_size(body: &serde_json::Value, body_json: &str) -> ser
 }
 
 fn is_retryable_transport_error(err: &CodexError) -> bool {
-    err.status == 0
-        && (err.message.contains("Timed out waiting")
-            || err.message.contains("Transport error")
-            || err.message.contains("connection reset")
-            || err.message.contains("connection closed")
-            || err.message.contains("timed out")
-            || err.message.contains("econnreset")
-            || err.message.contains("etimedout"))
+    (err.detail.as_deref() == Some("websocket_pre_request") && should_retry_status(err.status))
+        || (err.status == 0
+            && (err.message.contains("Timed out waiting")
+                || err.message.contains("Transport error")
+                || err.message.contains("connection reset")
+                || err.message.contains("connection closed")
+                || err.message.contains("timed out")
+                || err.message.contains("econnreset")
+                || err.message.contains("etimedout")))
 }
 
 fn is_retryable_reqwest_error(err: &reqwest::Error) -> bool {
@@ -896,6 +898,32 @@ mod tests {
         let display = format!("{err}");
         assert!(display.contains("429"));
         assert!(display.contains("Rate limited"));
+    }
+
+    #[test]
+    fn websocket_pre_request_502_is_retryable() {
+        let err = CodexError {
+            status: 502,
+            message: "WebSocket connect error".to_string(),
+            detail: Some("websocket_pre_request".to_string()),
+            retry_after: Some("3".to_string()),
+            origin: CodexErrorOrigin::WebSocket,
+        };
+
+        assert!(is_retryable_transport_error(&err));
+    }
+
+    #[test]
+    fn websocket_pre_request_400_is_not_retryable() {
+        let err = CodexError {
+            status: 400,
+            message: "WebSocket connect error".to_string(),
+            detail: Some("websocket_pre_request".to_string()),
+            retry_after: None,
+            origin: CodexErrorOrigin::WebSocket,
+        };
+
+        assert!(!is_retryable_transport_error(&err));
     }
 
     #[test]
