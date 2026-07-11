@@ -169,11 +169,9 @@ impl Provider for CodexProvider {
                 Ok(b) => b,
                 Err(e) => {
                     clear_continuation(ctx.session_id.as_deref());
-                    return json_error(
-                        StatusCode::BAD_GATEWAY,
-                        "api_error",
-                        format!("Stream translation error: {e}"),
-                    );
+                    return map_codex_failure_to_response(&format!(
+                        "Stream translation error: {e}"
+                    ));
                 }
             };
             if let Some(monitor) = ctx.monitor.as_ref() {
@@ -223,11 +221,7 @@ impl Provider for CodexProvider {
                 }
                 Err(e) => {
                     clear_continuation(ctx.session_id.as_deref());
-                    json_error(
-                        StatusCode::BAD_GATEWAY,
-                        "api_error",
-                        format!("Accumulation error: {e}"),
-                    )
+                    map_codex_failure_to_response(&format!("Accumulation error: {e}"))
                 }
             }
         }
@@ -414,11 +408,7 @@ async fn live_stream_response_once(
                     };
                 }
                 clear_continuation(ctx.session_id.as_deref());
-                return LiveStreamStart::Response(json_error(
-                    StatusCode::BAD_GATEWAY,
-                    "api_error",
-                    message,
-                ));
+                return LiveStreamStart::Response(map_codex_failure_to_response(&message));
             }
         };
         if !chunk.is_empty() {
@@ -801,6 +791,11 @@ fn update_continuation_from_upstream(
 // ---------------------------------------------------------------------------
 
 fn map_codex_error_to_response(err: &client::CodexError) -> Response {
+    let message = codex_error_message(err);
+    if is_context_window_overflow(message) {
+        return map_codex_failure_to_response(message);
+    }
+
     match err.status {
         401 | 403 => json_error(
             StatusCode::UNAUTHORIZED,
@@ -817,12 +812,20 @@ fn map_codex_error_to_response(err: &client::CodexError) -> Response {
             let headers = [(http::header::RETRY_AFTER, retry_after)];
             (headers, resp).into_response()
         }
-        _ => json_error(
-            StatusCode::BAD_GATEWAY,
-            "api_error",
-            codex_error_message(err),
-        ),
+        _ => json_error(StatusCode::BAD_GATEWAY, "api_error", message),
     }
+}
+
+fn map_codex_failure_to_response(message: &str) -> Response {
+    if is_context_window_overflow(message) {
+        json_error(StatusCode::PAYLOAD_TOO_LARGE, "request_too_large", message)
+    } else {
+        json_error(StatusCode::BAD_GATEWAY, "api_error", message)
+    }
+}
+
+fn is_context_window_overflow(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("context window")
 }
 
 fn codex_error_message(err: &client::CodexError) -> &str {
