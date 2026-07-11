@@ -8,6 +8,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use jiff::{Timestamp, Zoned, tz::TimeZone};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -903,16 +904,16 @@ fn format_duration(duration: Duration) -> String {
 }
 
 fn format_system_time(time: SystemTime) -> String {
-    let Ok(duration) = time.duration_since(SystemTime::UNIX_EPOCH) else {
+    format_system_time_in_zone(time, TimeZone::system())
+}
+
+fn format_system_time_in_zone(time: SystemTime, time_zone: TimeZone) -> String {
+    let Ok(timestamp) = Timestamp::try_from(time) else {
         return "-".to_string();
     };
-    let seconds = duration.as_secs() % 86_400;
-    format!(
-        "{:02}:{:02}:{:02}",
-        seconds / 3600,
-        (seconds % 3600) / 60,
-        seconds % 60
-    )
+    Zoned::new(timestamp, time_zone)
+        .strftime("%H:%M:%S")
+        .to_string()
 }
 
 #[cfg(test)]
@@ -974,6 +975,14 @@ mod tests {
         headers: &'a [(&'a str, Alignment); N],
     ) -> [&'a str; N] {
         headers.map(|(label, _)| label)
+    }
+
+    #[test]
+    fn format_system_time_applies_non_utc_time_zone() {
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(20 * 60 * 60);
+        let time_zone = TimeZone::fixed(jiff::tz::offset(5));
+
+        assert_eq!(format_system_time_in_zone(timestamp, time_zone), "01:00:00");
     }
 
     #[test]
