@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.1.14 (2026-07-12)
+
+- Codex hosted web searches work when Claude Code routes them through the Luna
+  small model. ([#26](https://github.com/raine/claude-code-proxy/issues/26),
+  [#35](https://github.com/raine/claude-code-proxy/pull/35))
+- Codex context-window errors trigger Claude Code's compaction flow instead of
+  ending the request. ([#29](https://github.com/raine/claude-code-proxy/pull/29))
+- Codex requests fall back to HTTP after WebSocket handshake failures while
+  preserving live streaming for established connections.
+  ([#39](https://github.com/raine/claude-code-proxy/pull/39))
+- Codex HTTP and WebSocket failures retain upstream status codes and error
+  details, making failures clearer and more actionable.
+  ([#40](https://github.com/raine/claude-code-proxy/pull/40))
+
 ## v0.1.13 (2026-07-12)
 
 - Grok users can sign in on headless hosts with `grok auth device`.
