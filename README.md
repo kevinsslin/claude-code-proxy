@@ -520,6 +520,12 @@ Sign in with your **ChatGPT Plus/Pro account**, not an OpenAI API account. The
 token file includes the extracted `chatgpt_account_id` so the proxy can set the
 `ChatGPT-Account-Id` header on every upstream call.
 
+The proxy owns and rotates its Codex credentials independently. It does not read
+or modify native Codex CLI credentials in `~/.codex` or native Codex credential
+backends. If an earlier proxy version used your native Codex login implicitly,
+run `claude-code-proxy codex auth login` or
+`claude-code-proxy codex auth device` once after upgrading.
+
 #### `codex auth device`
 
 Same OAuth flow, but for headless machines. Prints a short user code and a URL;
