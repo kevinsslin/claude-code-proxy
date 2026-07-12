@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.1.15 (2026-07-12)
+
+- Codex function tools preserve optional parameters, preventing unintended tool
+  arguments and incorrect agent isolation choices.
+  ([#43](https://github.com/raine/claude-code-proxy/issues/43))
+- Forced Codex web searches return live results while preserving allowed and
+  blocked domain filters.
+  ([#26](https://github.com/raine/claude-code-proxy/issues/26))
+- Codex credentials are stored and refreshed independently from the native Codex
+  CLI, preventing either application from invalidating the other's login. Users
+  who relied on the native Codex login must sign in to the proxy once after
+  upgrading.
+- [Expanded guidance](https://github.com/raine/claude-code-proxy/#switching-models-and-backends)
+  explains how to switch models within the proxy and how to switch between the
+  proxy and direct Anthropic.
+
 ## v0.1.14 (2026-07-12)
 
 - Codex hosted web searches work when Claude Code routes them through the Luna
