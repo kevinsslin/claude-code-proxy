@@ -31,6 +31,8 @@ pub enum CodexErrorOrigin {
     Http,
     WebSocket,
     Auth,
+    BufferedHttp,
+    BufferedWebSocket,
 }
 
 impl CodexError {
@@ -418,6 +420,7 @@ impl CodexHttpClient {
             }
 
             if let Ok(response) = &result
+                && (200..300).contains(&response.status)
                 && let Some(failure) = super::events::first_retryable_failure(&response.body)
             {
                 if transport_failures < MAX_BUFFERED_TRANSPORT_RETRIES {
@@ -429,7 +432,7 @@ impl CodexHttpClient {
                             message: failure.message.clone(),
                             detail: Some(failure.message),
                             retry_after: failure.retry_after,
-                            origin: CodexErrorOrigin::Http,
+                            origin: buffered_origin(transport),
                         });
                     }
                     log_buffered_retry(
@@ -540,7 +543,7 @@ impl CodexHttpClient {
                             .map(|(_, value)| value.as_str());
                         let delay = compute_backoff_delay(transport_failures, retry_after);
                         if delay.exceeds_budget {
-                            return Err(codex_status_error(response));
+                            return Err(codex_status_error(response, transport));
                         }
                         log_buffered_retry(
                             ctx,
@@ -562,7 +565,7 @@ impl CodexHttpClient {
                         "upstream",
                         "retryable upstream status",
                     );
-                    return Err(codex_status_error(response));
+                    return Err(codex_status_error(response, transport));
                 }
                 Ok(response) => return Ok(response),
                 Err(err) if should_retry_without_continuation(&err, active_continuation) => {
@@ -1032,7 +1035,10 @@ fn auth_refresh_error(err: anyhow::Error) -> CodexError {
     }
 }
 
-fn codex_status_error(response: CodexResponse) -> CodexError {
+fn codex_status_error(
+    response: CodexResponse,
+    transport: crate::config::CodexTransport,
+) -> CodexError {
     let retry_after = response
         .headers
         .iter()
@@ -1059,7 +1065,16 @@ fn codex_status_error(response: CodexResponse) -> CodexError {
         message: message.clone(),
         detail: Some(message),
         retry_after,
-        origin: CodexErrorOrigin::Http,
+        origin: buffered_origin(transport),
+    }
+}
+
+fn buffered_origin(transport: crate::config::CodexTransport) -> CodexErrorOrigin {
+    match transport {
+        crate::config::CodexTransport::Http => CodexErrorOrigin::BufferedHttp,
+        crate::config::CodexTransport::WebSocket | crate::config::CodexTransport::Auto => {
+            CodexErrorOrigin::BufferedWebSocket
+        }
     }
 }
 
@@ -1072,6 +1087,8 @@ fn codex_error_origin_name(origin: CodexErrorOrigin) -> &'static str {
         CodexErrorOrigin::Http => "http",
         CodexErrorOrigin::WebSocket => "websocket",
         CodexErrorOrigin::Auth => "auth",
+        CodexErrorOrigin::BufferedHttp => "buffered_http",
+        CodexErrorOrigin::BufferedWebSocket => "buffered_websocket",
     }
 }
 
@@ -1122,7 +1139,7 @@ fn log_buffered_retry_exhausted(
 
 fn is_retryable_transport_error(err: &CodexError) -> bool {
     if err.detail.as_deref() == Some("websocket_pre_request") {
-        return err.status == 0 || should_retry_status(err.status);
+        return err.status == 0 || should_retry_codex_status(err.status);
     }
     if err.status != 0 {
         return false;

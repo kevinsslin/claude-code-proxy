@@ -768,7 +768,13 @@ fn map_codex_error_to_response(err: &client::CodexError) -> Response {
             let headers = [(http::header::RETRY_AFTER, retry_after)];
             (headers, resp).into_response()
         }
-        status @ (500 | 502 | 503 | 504 | 529) => {
+        status @ (500 | 502 | 503 | 504 | 529)
+            if matches!(
+                err.origin,
+                client::CodexErrorOrigin::BufferedHttp
+                    | client::CodexErrorOrigin::BufferedWebSocket
+            ) =>
+        {
             let response = json_error(
                 StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
                 if status == 529 {
