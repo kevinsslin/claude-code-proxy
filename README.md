@@ -226,7 +226,8 @@ local compaction threshold, such as `gpt-5.6-sol[1m]`, `gpt-5.6-luna[1m]`, or
 request upstream. The suffix affects Claude Code's local compaction decision and
 does not increase the upstream model's context window.
 
-GPT-5.6 Codex accepts up to 272K tokens through ChatGPT subscriptions. Set
+OpenAI's [GPT-5.6 subscription update](https://x.com/thsottiaux/status/2076495156757577895)
+sets the ChatGPT context limit to 272K tokens. Set
 `CLAUDE_CODE_AUTO_COMPACT_WINDOW=272000` with `gpt-5.6-sol[1m]` so Claude Code
 compacts before the upstream limit.
 
