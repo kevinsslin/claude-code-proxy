@@ -15,23 +15,29 @@ const COMPLETED_PHASE: u64 = 20;
 #[derive(Debug)]
 pub struct MockMonitor {
     started_at: SystemTime,
+    output_buckets: HashMap<Option<String>, Vec<(u64, u64)>>,
     tick: u64,
 }
 
 impl MockMonitor {
     pub fn new() -> Self {
+        let now = SystemTime::now();
         Self {
-            started_at: SystemTime::now() - Duration::from_secs(3_723),
+            started_at: now - Duration::from_secs(3_723),
+            output_buckets: initial_output_buckets(now),
             tick: 0,
         }
     }
 
     pub fn snapshot(&mut self) -> MonitorState {
+        let now = SystemTime::now();
+        advance_output_buckets(&mut self.output_buckets, now, self.tick);
         let state = mock_state_for_tick(
             self.started_at,
-            SystemTime::now(),
+            now,
             Instant::now(),
             self.tick,
+            &self.output_buckets,
         );
         self.tick = self.tick.wrapping_add(1);
         state
@@ -46,7 +52,15 @@ impl Default for MockMonitor {
 
 pub fn mock_state() -> MonitorState {
     let now = SystemTime::now();
-    mock_state_for_tick(now - Duration::from_secs(3_723), now, Instant::now(), 0)
+    let mut output_buckets = initial_output_buckets(now);
+    advance_output_buckets(&mut output_buckets, now, 0);
+    mock_state_for_tick(
+        now - Duration::from_secs(3_723),
+        now,
+        Instant::now(),
+        0,
+        &output_buckets,
+    )
 }
 
 fn mock_state_for_tick(
@@ -54,6 +68,7 @@ fn mock_state_for_tick(
     now: SystemTime,
     instant_now: Instant,
     tick: u64,
+    output_buckets: &HashMap<Option<String>, Vec<(u64, u64)>>,
 ) -> MonitorState {
     let mut streaming = active_request(
         now,
@@ -333,8 +348,7 @@ fn mock_state_for_tick(
     recent.push_back(no_status);
 
     add_simulated_requests(now, instant_now, tick, &mut active, &mut recent);
-    let output_buckets = simulated_output_buckets(now, tick, &active, &recent);
-    let sessions = session_summaries(&active, &recent, &output_buckets);
+    let sessions = session_summaries(&active, &recent, output_buckets);
     MonitorState {
         started_at,
         sessions,
@@ -343,12 +357,7 @@ fn mock_state_for_tick(
     }
 }
 
-fn simulated_output_buckets(
-    now: SystemTime,
-    tick: u64,
-    active: &[ActiveRequest],
-    recent: &VecDeque<CompletedRequest>,
-) -> HashMap<Option<String>, Vec<(u64, u64)>> {
+fn initial_output_buckets(now: SystemTime) -> HashMap<Option<String>, Vec<(u64, u64)>> {
     const HISTORIES: [(&str, [u64; 12]); 3] = [
         (
             "57c7c914-ada4-4f40-9672-985f950fbb66",
@@ -380,38 +389,51 @@ fn simulated_output_buckets(
             );
         }
     }
+    buckets
+}
 
-    for request in recent {
-        if let Some(tokens) = request.output_tokens.filter(|tokens| *tokens > 0) {
-            record_output_bucket(
-                &mut buckets,
-                request.session_id.clone(),
-                super::session_token_bucket(request.finished_at),
-                tokens,
-            );
-        }
-    }
-    for request in active {
-        if let Some(tokens) = request.output_tokens.filter(|tokens| *tokens > 0) {
-            record_output_bucket(
-                &mut buckets,
-                request.session_id.clone(),
-                current_bucket,
-                tokens,
-            );
-        }
-    }
-
+fn advance_output_buckets(
+    buckets: &mut HashMap<Option<String>, Vec<(u64, u64)>>,
+    now: SystemTime,
+    tick: u64,
+) {
+    let current_bucket = super::session_token_bucket(now);
     record_output_bucket(
-        &mut buckets,
+        buckets,
         Some("57c7c914-ada4-4f40-9672-985f950fbb66".to_string()),
         current_bucket,
-        120 + (tick % 40) * 80,
+        if tick % 2 == 0 { 10 } else { 25 },
     );
+    if tick % 4 == 0 {
+        record_output_bucket(
+            buckets,
+            Some("terminal-refactor".to_string()),
+            current_bucket,
+            120,
+        );
+    }
+    if tick % 5 == 0 {
+        record_output_bucket(
+            buckets,
+            Some("cursor-session".to_string()),
+            current_bucket,
+            220,
+        );
+    }
+    if tick % REQUEST_TICKS == COMPLETED_PHASE {
+        let cycle = tick / REQUEST_TICKS;
+        if cycle % 4 != 3 {
+            record_output_bucket(
+                buckets,
+                Some(format!("demo-session-{cycle:03}")),
+                current_bucket,
+                128 + cycle.saturating_mul(11),
+            );
+        }
+    }
     for samples in buckets.values_mut() {
         samples.sort_by_key(|(bucket, _)| *bucket);
     }
-    buckets
 }
 
 fn record_output_bucket(
@@ -732,6 +754,65 @@ mod tests {
                 .sessions
                 .iter()
                 .any(|session| session.session_id.is_none())
+        );
+    }
+
+    #[test]
+    fn mock_sparkline_grows_current_bucket_and_freezes_completed_buckets() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let session_id = Some("57c7c914-ada4-4f40-9672-985f950fbb66".to_string());
+        let current_bucket = super::super::session_token_bucket(now);
+        let mut buckets = initial_output_buckets(now);
+        advance_output_buckets(&mut buckets, now, 0);
+        let initial_samples = buckets.get(&session_id).unwrap().clone();
+        let initial_current = initial_samples
+            .iter()
+            .find(|(bucket, _)| *bucket == current_bucket)
+            .unwrap()
+            .1;
+        let initial_past = initial_samples
+            .iter()
+            .filter(|(bucket, _)| *bucket < current_bucket)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        advance_output_buckets(&mut buckets, now + Duration::from_secs(1), 1);
+        let growing_samples = buckets.get(&session_id).unwrap();
+        assert_eq!(
+            growing_samples
+                .iter()
+                .find(|(bucket, _)| *bucket == current_bucket)
+                .unwrap()
+                .1,
+            initial_current + 25
+        );
+        assert_eq!(
+            growing_samples
+                .iter()
+                .filter(|(bucket, _)| *bucket < current_bucket)
+                .cloned()
+                .collect::<Vec<_>>(),
+            initial_past
+        );
+
+        let next_bucket_time = now + Duration::from_secs(10);
+        advance_output_buckets(&mut buckets, next_bucket_time, 2);
+        let advanced_samples = buckets.get(&session_id).unwrap();
+        assert_eq!(
+            advanced_samples
+                .iter()
+                .find(|(bucket, _)| *bucket == current_bucket)
+                .unwrap()
+                .1,
+            initial_current + 25
+        );
+        assert_eq!(
+            advanced_samples
+                .iter()
+                .find(|(bucket, _)| *bucket == current_bucket + 1)
+                .unwrap()
+                .1,
+            10
         );
     }
 
