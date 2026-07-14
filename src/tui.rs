@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     io::{self, Stdout},
+    sync::mpsc,
     time::{Duration, SystemTime},
 };
 
@@ -150,12 +151,19 @@ pub struct MonitorUiConfig<'a> {
     pub port: u16,
     pub registry: &'a Registry,
     pub shutdown: Option<oneshot::Sender<()>>,
+    pub shutdown_complete: Option<mpsc::Receiver<()>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MonitorExit {
+    ShutdownComplete,
+    ForceQuit,
 }
 
 pub fn run_monitor(
     handle: MonitorHandle,
     config: MonitorUiConfig<'_>,
-) -> Result<(), anyhow::Error> {
+) -> Result<MonitorExit, anyhow::Error> {
     run_monitor_loop(|| handle.snapshot(), config, None)
 }
 
@@ -168,16 +176,18 @@ pub fn run_mock_monitor(port: u16, registry: &Registry) -> Result<(), anyhow::Er
             port,
             registry,
             shutdown: None,
+            shutdown_complete: None,
         },
         Some(mock_setup_text(port, registry)),
     )
+    .map(|_| ())
 }
 
 fn run_monitor_loop(
     mut snapshot: impl FnMut() -> MonitorState,
     config: MonitorUiConfig<'_>,
     setup_text_override: Option<String>,
-) -> Result<(), anyhow::Error> {
+) -> Result<MonitorExit, anyhow::Error> {
     let mut terminal = setup_terminal()?;
     let _guard = TerminalGuard;
     let mut app = MonitorApp {
@@ -190,29 +200,47 @@ fn run_monitor_loop(
         selected: 0,
         recent_selected: 0,
         tick: 0,
+        phase: MonitorPhase::Running,
         shutdown: config.shutdown,
+        shutdown_complete: config.shutdown_complete,
     };
 
+    let run_result = run_monitor_events(&mut terminal, &mut snapshot, &mut app);
+    if run_result.is_err() {
+        app.begin_shutdown();
+        let state = snapshot();
+        let _ = terminal.draw(|frame| render(frame, &mut app, &state));
+        app.wait_for_shutdown_completion();
+    }
+    let cursor_result = terminal.show_cursor();
+    let exit = run_result?;
+    cursor_result?;
+    Ok(exit)
+}
+
+fn run_monitor_events(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    mut snapshot: impl FnMut() -> MonitorState,
+    app: &mut MonitorApp,
+) -> Result<MonitorExit, anyhow::Error> {
     loop {
         let state = snapshot();
         app.clamp_selection(state.sessions.len(), state.recent.len());
         app.tick = app.tick.wrapping_add(1);
-        terminal.draw(|frame| render(frame, &mut app, &state))?;
+        terminal.draw(|frame| render(frame, app, &state))?;
+        if app.shutdown_is_complete() {
+            return Ok(MonitorExit::ShutdownComplete);
+        }
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) => match key.code {
-                    KeyCode::Char('q') => {
-                        if let Some(shutdown) = app.shutdown.take() {
-                            let _ = shutdown.send(());
-                        }
-                        break;
-                    }
+                    KeyCode::Char('q') => app.begin_shutdown(),
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if let Some(shutdown) = app.shutdown.take() {
-                            let _ = shutdown.send(());
+                        if app.handle_ctrl_c() {
+                            return Ok(MonitorExit::ForceQuit);
                         }
-                        break;
                     }
+                    _ if app.phase == MonitorPhase::ShuttingDown => {}
                     KeyCode::Char('?') => app.show_help = !app.show_help,
                     KeyCode::Char('b') => app.show_setup = !app.show_setup,
                     KeyCode::Tab => app.focus = app.focus.next(),
@@ -253,8 +281,6 @@ fn run_monitor_loop(
             }
         }
     }
-    terminal.show_cursor()?;
-    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -278,6 +304,12 @@ enum DetailView {
     Request,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MonitorPhase {
+    Running,
+    ShuttingDown,
+}
+
 struct MonitorApp {
     listen_url: String,
     setup_text: String,
@@ -288,10 +320,49 @@ struct MonitorApp {
     selected: usize,
     recent_selected: usize,
     tick: usize,
+    phase: MonitorPhase,
     shutdown: Option<oneshot::Sender<()>>,
+    shutdown_complete: Option<mpsc::Receiver<()>>,
 }
 
 impl MonitorApp {
+    fn handle_ctrl_c(&mut self) -> bool {
+        if self.phase == MonitorPhase::ShuttingDown {
+            true
+        } else {
+            self.begin_shutdown();
+            false
+        }
+    }
+
+    fn begin_shutdown(&mut self) {
+        if self.phase == MonitorPhase::ShuttingDown {
+            return;
+        }
+        self.phase = MonitorPhase::ShuttingDown;
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+    }
+
+    fn shutdown_is_complete(&self) -> bool {
+        let Some(shutdown_complete) = &self.shutdown_complete else {
+            return self.phase == MonitorPhase::ShuttingDown;
+        };
+        match shutdown_complete.try_recv() {
+            Ok(()) | Err(mpsc::TryRecvError::Disconnected) => true,
+            Err(mpsc::TryRecvError::Empty) => false,
+        }
+    }
+
+    fn wait_for_shutdown_completion(&self) {
+        if !self.shutdown_is_complete()
+            && let Some(shutdown_complete) = &self.shutdown_complete
+        {
+            let _ = shutdown_complete.recv();
+        }
+    }
+
     fn clamp_selection(&mut self, sessions: usize, recent: usize) {
         self.selected = self.selected.min(sessions.saturating_sub(1));
         self.recent_selected = self.recent_selected.min(recent.saturating_sub(1));
@@ -339,9 +410,7 @@ impl MonitorApp {
 
 impl Drop for MonitorApp {
     fn drop(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
+        self.begin_shutdown();
     }
 }
 
@@ -409,6 +478,9 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &mut MonitorApp, state: &MonitorS
     }
     if app.show_help {
         render_help_overlay(frame, area);
+    }
+    if app.phase == MonitorPhase::ShuttingDown {
+        render_shutdown_overlay(frame, area, app.tick);
     }
 }
 
@@ -1333,6 +1405,43 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, area: Rect, _app: &MonitorApp) 
     );
 }
 
+fn render_shutdown_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, tick: usize) {
+    let width = 40.min(area.width);
+    let height = 5.min(area.height);
+    let popup = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(format!("{} ", spinner(tick)), Style::default().fg(TEAL)),
+                Span::styled(
+                    "Shutting down...",
+                    Style::default().fg(WHITE).add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(Span::styled(
+                "Press Ctrl-C to force quit",
+                Style::default().fg(DIM_WHITE),
+            )),
+        ])
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(TEAL))
+                .style(Style::default().bg(BG)),
+        )
+        .style(Style::default().bg(BG)),
+        popup,
+    );
+}
+
 fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect) {
     let width = 48.min(area.width.saturating_sub(4)).max(24);
     let height = 12.min(area.height.saturating_sub(2)).max(8);
@@ -2038,6 +2147,66 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_c_starts_shutdown_then_requests_force_quit() {
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        let (_shutdown_complete_tx, shutdown_complete_rx) = mpsc::channel();
+        let mut app = MonitorApp {
+            listen_url: "http://127.0.0.1:3000".to_string(),
+            setup_text: String::new(),
+            show_setup: false,
+            show_help: false,
+            detail: None,
+            focus: FocusPane::Sessions,
+            selected: 0,
+            recent_selected: 0,
+            tick: 0,
+            phase: MonitorPhase::Running,
+            shutdown: Some(shutdown_tx),
+            shutdown_complete: Some(shutdown_complete_rx),
+        };
+
+        assert!(!app.handle_ctrl_c());
+        assert!(app.handle_ctrl_c());
+
+        assert_eq!(app.phase, MonitorPhase::ShuttingDown);
+        assert_eq!(shutdown_rx.try_recv(), Ok(()));
+        let state = MonitorHandle::default().snapshot();
+        let screen = draw(80, 24, |frame| render(frame, &mut app, &state));
+        let text = buffer_text(&screen);
+        assert!(text.contains("Shutting down..."));
+        assert!(text.contains("Press Ctrl-C to force quit"));
+    }
+
+    #[test]
+    fn shutdown_completion_accepts_notification_and_sender_drop() {
+        let (complete_tx, complete_rx) = mpsc::channel();
+        let app = MonitorApp {
+            listen_url: String::new(),
+            setup_text: String::new(),
+            show_setup: false,
+            show_help: false,
+            detail: None,
+            focus: FocusPane::Sessions,
+            selected: 0,
+            recent_selected: 0,
+            tick: 0,
+            phase: MonitorPhase::Running,
+            shutdown: None,
+            shutdown_complete: Some(complete_rx),
+        };
+
+        assert!(!app.shutdown_is_complete());
+        complete_tx.send(()).unwrap();
+        assert!(app.shutdown_is_complete());
+
+        let (complete_tx, complete_rx) = mpsc::channel();
+        let mut app = app;
+        app.shutdown_complete = Some(complete_rx);
+        drop(complete_tx);
+        assert!(app.shutdown_is_complete());
+    }
+
+    #[test]
     fn header_renders_configured_listen_url() {
         let app = MonitorApp {
             listen_url: "http://[::]:18765".to_string(),
@@ -2049,7 +2218,9 @@ mod tests {
             selected: 0,
             recent_selected: 0,
             tick: 0,
+            phase: MonitorPhase::Running,
             shutdown: None,
+            shutdown_complete: Some(mpsc::channel().1),
         };
         let state = MonitorHandle::default().snapshot();
 
@@ -2072,7 +2243,9 @@ mod tests {
             selected: 10,
             recent_selected: 10,
             tick: 0,
+            phase: MonitorPhase::Running,
             shutdown: None,
+            shutdown_complete: Some(mpsc::channel().1),
         };
 
         app.clamp_selection(3, 4);
@@ -2096,7 +2269,9 @@ mod tests {
             selected: 1,
             recent_selected: 0,
             tick: 0,
+            phase: MonitorPhase::Running,
             shutdown: None,
+            shutdown_complete: Some(mpsc::channel().1),
         };
 
         app.move_down(2, 3, true);
@@ -2120,7 +2295,9 @@ mod tests {
             selected: 1,
             recent_selected: 0,
             tick: 0,
+            phase: MonitorPhase::Running,
             shutdown: None,
+            shutdown_complete: Some(mpsc::channel().1),
         };
 
         app.move_down(2, 3, false);

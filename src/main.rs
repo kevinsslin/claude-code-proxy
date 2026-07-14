@@ -6,7 +6,7 @@ use claude_code_proxy::{
     paths,
     registry::{ANTHROPIC_STYLE_ALIASES, Registry},
     server::{self, ServerConfig},
-    tui::{self, MonitorUiConfig},
+    tui::{self, MonitorExit, MonitorUiConfig},
 };
 use std::io::IsTerminal;
 
@@ -108,19 +108,22 @@ fn main() -> Result<()> {
                     let _stderr_guard = logging::suppress_stderr();
                     let monitor = MonitorHandle::default();
                     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+                    let (shutdown_complete_tx, shutdown_complete_rx) = std::sync::mpsc::channel();
                     let listener = runtime
                         .block_on(server::bind_proxy_listener(&bind_address, effective_port))?;
                     let local_addr = listener.local_addr()?;
                     let monitor_listen_url =
                         listen_url(&local_addr.ip().to_string(), local_addr.port());
                     let server_monitor = monitor.clone();
-                    let server_task = runtime.spawn(server::serve_listener(
-                        listener,
-                        Some(server_monitor),
-                        async move {
-                            let _ = shutdown_rx.await;
-                        },
-                    ));
+                    let server_task = runtime.spawn(async move {
+                        let result =
+                            server::serve_listener(listener, Some(server_monitor), async move {
+                                let _ = shutdown_rx.await;
+                            })
+                            .await;
+                        let _ = shutdown_complete_tx.send(());
+                        result
+                    });
                     let ui_result = tui::run_monitor(
                         monitor,
                         MonitorUiConfig {
@@ -128,8 +131,14 @@ fn main() -> Result<()> {
                             port: effective_port,
                             registry: &registry,
                             shutdown: Some(shutdown_tx),
+                            shutdown_complete: Some(shutdown_complete_rx),
                         },
                     );
+                    if matches!(&ui_result, Ok(MonitorExit::ForceQuit)) {
+                        server_task.abort();
+                        let _ = runtime.block_on(server_task);
+                        std::process::exit(130);
+                    }
                     let server_result = runtime.block_on(server_task)?;
                     ui_result?;
                     server_result.map_err(|err| anyhow::anyhow!(err))
