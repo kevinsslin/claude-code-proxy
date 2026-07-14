@@ -42,6 +42,7 @@ const YELLOW: Color = Color::Rgb(220, 200, 100);
 const BLUE: Color = Color::Rgb(120, 170, 230);
 const DIM: Color = Color::Rgb(100, 104, 114);
 const ACTIVE_MODEL_WIDTH: u16 = 40;
+const SESSION_MODEL_WIDTH: u16 = 36;
 const RECENT_MODEL_WIDTH: u16 = 36;
 
 const SESSION_SPARKLINE_MIN_WIDTH: u16 = 170;
@@ -715,6 +716,32 @@ fn token_sparkline_line(
     ])
 }
 
+fn session_table_widths(show_sparkline: bool) -> Vec<Constraint> {
+    let mut widths = vec![
+        Constraint::Length(1),
+        Constraint::Length(8),
+        Constraint::Length(18),
+        Constraint::Length(4),
+        Constraint::Length(4),
+        Constraint::Length(4),
+        Constraint::Length(10),
+        if show_sparkline {
+            Constraint::Length(SESSION_MODEL_WIDTH)
+        } else {
+            Constraint::Fill(1)
+        },
+        Constraint::Length(7),
+        Constraint::Length(9),
+        Constraint::Length(9),
+        Constraint::Length(12),
+    ];
+    if show_sparkline {
+        widths.push(Constraint::Fill(1));
+    }
+    widths.push(Constraint::Length(10));
+    widths
+}
+
 fn render_sessions(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -728,24 +755,7 @@ fn render_sessions(
     }
 
     let show_sparkline = area.width >= SESSION_SPARKLINE_MIN_WIDTH;
-    let mut widths = vec![
-        Constraint::Length(1),
-        Constraint::Length(8),
-        Constraint::Length(18),
-        Constraint::Length(4),
-        Constraint::Length(4),
-        Constraint::Length(4),
-        Constraint::Length(10),
-        Constraint::Percentage(20),
-        Constraint::Length(7),
-        Constraint::Length(9),
-        Constraint::Length(9),
-        Constraint::Length(12),
-    ];
-    if show_sparkline {
-        widths.push(Constraint::Fill(1));
-    }
-    widths.push(Constraint::Length(10));
+    let widths = session_table_widths(show_sparkline);
     let model_width = table_column_width(area, &widths, 7);
     let sparkline_width = show_sparkline
         .then(|| table_column_width(area, &widths, 12))
@@ -1480,6 +1490,25 @@ mod tests {
         assert!(
             usize::from(RECENT_MODEL_WIDTH) >= "claude-sonnet-4-6 → gpt-5.6-terra".chars().count()
         );
+    }
+
+    #[test]
+    fn session_columns_preserve_fixed_widths_before_allocating_flexible_space() {
+        let compact = session_table_widths(false);
+        let area = Rect::new(0, 0, 150, 10);
+
+        assert_eq!(table_column_width(area, &compact, 2), 18);
+        assert_eq!(table_column_width(area, &compact, 6), 10);
+        assert_eq!(table_column_width(area, &compact, 8), 7);
+        assert!(table_column_width(area, &compact, 7) >= 20);
+
+        let wide = session_table_widths(true);
+        let wide_area = Rect::new(0, 0, 200, 10);
+        assert_eq!(
+            table_column_width(wide_area, &wide, 7),
+            usize::from(SESSION_MODEL_WIDTH)
+        );
+        assert!(table_column_width(wide_area, &wide, 12) >= 20);
     }
 
     #[test]
