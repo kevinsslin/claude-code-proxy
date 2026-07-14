@@ -39,9 +39,10 @@ const BLUE: Color = Color::Rgb(120, 170, 230);
 const DIM: Color = Color::Rgb(100, 104, 114);
 const RECENT_MODEL_WIDTH: u16 = 36;
 
-const SESSION_TABLE_HEADERS: [(&str, Alignment); 12] = [
+const SESSION_TABLE_HEADERS: [(&str, Alignment); 13] = [
     ("", Alignment::Left),
     ("ID", Alignment::Left),
+    ("Project", Alignment::Left),
     ("Active", Alignment::Right),
     ("Reqs", Alignment::Right),
     ("Fail", Alignment::Right),
@@ -625,6 +626,7 @@ fn render_sessions(
     let widths = [
         Constraint::Length(1),
         Constraint::Length(8),
+        Constraint::Length(18),
         Constraint::Length(6),
         Constraint::Length(5),
         Constraint::Length(5),
@@ -636,7 +638,7 @@ fn render_sessions(
         Constraint::Length(12),
         Constraint::Length(10),
     ];
-    let model_width = table_column_width(area, &widths, 6);
+    let model_width = table_column_width(area, &widths, 7);
     let rows = sessions.iter().enumerate().map(|(index, session)| {
         let marker = if focused && index == selected {
             ">"
@@ -646,6 +648,7 @@ fn render_sessions(
         Row::new(vec![
             Cell::from(Span::styled(marker, Style::default().fg(TEAL))),
             text_cell(display_session_id(session.session_id.as_deref())),
+            text_cell(session.project.as_deref().unwrap_or("-")),
             number_cell(session.active_count.to_string()),
             number_cell(session.request_count.to_string()),
             number_cell(session.failure_count.to_string()),
@@ -863,6 +866,7 @@ fn render_session_detail(
     let lines = if let Some(session) = state.sessions.get(selected) {
         vec![
             detail_line("session", session.label(), WHITE),
+            detail_line("project", session.project.as_deref().unwrap_or("-"), TEAL),
             detail_line("active requests", session.active_count.to_string(), YELLOW),
             detail_line(
                 "total requests",
@@ -1251,8 +1255,8 @@ mod tests {
         assert_eq!(
             table_header_labels(&SESSION_TABLE_HEADERS),
             [
-                "", "ID", "Active", "Reqs", "Fail", "Provider", "Model", "Effort", "In", "Out",
-                "Rate", "Status",
+                "", "ID", "Project", "Active", "Reqs", "Fail", "Provider", "Model", "Effort", "In",
+                "Out", "Rate", "Status",
             ]
         );
         assert_eq!(
@@ -1406,6 +1410,7 @@ mod tests {
             Some(1),
             EndpointKind::Messages,
         );
+        monitor.project_resolved("request-1", "example-project");
         monitor.provider_selected(
             "request-1",
             "codex",
@@ -1419,6 +1424,8 @@ mod tests {
         });
         let sessions_text = buffer_text(&sessions);
         assert!(sessions_text.contains("Provider"));
+        assert!(sessions_text.contains("Project"));
+        assert!(sessions_text.contains("example-project"));
         assert!(sessions_text.contains("sess-1"));
         assert!(!sessions_text.contains("No sessions"));
 

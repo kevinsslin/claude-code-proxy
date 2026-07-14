@@ -267,7 +267,7 @@ async fn monitor_records_successful_request_events() {
                 .uri("/v1/messages/count_tokens")
                 .header("content-type", "application/json")
                 .body(body_string(
-                    r#"{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}],"output_config":{"effort":"high"}}"#,
+                    r##"{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}],"system":"# Environment\n - Primary working directory: /projects/example","output_config":{"effort":"high"}}"##,
                 ))
                 .unwrap(),
         )
@@ -287,6 +287,8 @@ async fn monitor_records_successful_request_events() {
     assert_eq!(state.recent.len(), 1);
     assert_eq!(state.recent[0].status, RequestStatus::Completed);
     assert_eq!(state.recent[0].http_status, Some(200));
+    assert_eq!(state.recent[0].project.as_deref(), Some("example"));
+    assert_eq!(state.sessions[0].project.as_deref(), Some("example"));
     assert_eq!(state.recent[0].provider.as_deref(), Some("codex"));
     assert_eq!(state.recent[0].model.as_deref(), Some("gpt-5.4"));
     assert_eq!(state.recent[0].effort.as_deref(), Some("high"));

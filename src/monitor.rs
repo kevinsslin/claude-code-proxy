@@ -53,6 +53,10 @@ pub enum MonitorEvent {
         session_seq: Option<u64>,
         endpoint: EndpointKind,
     },
+    ProjectResolved {
+        request_id: String,
+        project: String,
+    },
     ProviderSelected {
         request_id: String,
         provider: String,
@@ -107,6 +111,7 @@ pub struct ActiveRequest {
     pub request_id: String,
     pub session_id: Option<String>,
     pub session_seq: Option<u64>,
+    pub project: Option<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -148,6 +153,7 @@ pub struct CompletedRequest {
     pub request_id: String,
     pub session_id: Option<String>,
     pub session_seq: Option<u64>,
+    pub project: Option<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -215,6 +221,7 @@ pub struct MonitorState {
 #[derive(Debug, Clone)]
 pub struct SessionSummary {
     pub session_id: Option<String>,
+    pub project: Option<String>,
     pub active_count: usize,
     pub request_count: usize,
     pub failure_count: usize,
@@ -307,6 +314,13 @@ impl MonitorHandle {
             session_id,
             session_seq,
             endpoint,
+        });
+    }
+
+    pub fn project_resolved(&self, request_id: impl Into<String>, project: impl Into<String>) {
+        self.publish(MonitorEvent::ProjectResolved {
+            request_id: request_id.into(),
+            project: project.into(),
         });
     }
 
@@ -432,6 +446,7 @@ impl MonitorStore {
                         request_id,
                         session_id,
                         session_seq,
+                        project: None,
                         provider: None,
                         model: None,
                         effort: None,
@@ -452,6 +467,14 @@ impl MonitorStore {
                         traffic_capture_path: None,
                     },
                 );
+            }
+            MonitorEvent::ProjectResolved {
+                request_id,
+                project,
+            } => {
+                if let Some(active) = self.active.get_mut(&request_id) {
+                    active.project = Some(project);
+                }
             }
             MonitorEvent::ProviderSelected {
                 request_id,
@@ -641,6 +664,7 @@ impl MonitorStore {
                 request_id: request_id.to_string(),
                 session_id: None,
                 session_seq: None,
+                project: None,
                 provider: None,
                 model: None,
                 effort: None,
@@ -670,6 +694,7 @@ impl MonitorStore {
             request_id: active.request_id,
             session_id: active.session_id,
             session_seq: active.session_seq,
+            project: active.project,
             provider: active.provider,
             model: active.model,
             effort: active.effort,
@@ -720,6 +745,7 @@ fn session_summaries(
             .entry(request.session_id.clone())
             .or_insert_with(|| SessionSummary {
                 session_id: request.session_id.clone(),
+                project: request.project.clone(),
                 active_count: 0,
                 request_count: 0,
                 failure_count: 0,
@@ -737,6 +763,7 @@ fn session_summaries(
         if request.status == RequestStatus::Failed {
             entry.failure_count += 1;
         }
+        entry.project = request.project.clone().or(entry.project.clone());
         entry.provider = request.provider.clone().or(entry.provider.clone());
         entry.model = request.model.clone().or(entry.model.clone());
         entry.effort = request.effort.clone().or(entry.effort.clone());
@@ -767,6 +794,7 @@ fn session_summaries(
             .entry(request.session_id.clone())
             .or_insert_with(|| SessionSummary {
                 session_id: request.session_id.clone(),
+                project: request.project.clone(),
                 active_count: 0,
                 request_count: 0,
                 failure_count: 0,
@@ -782,6 +810,7 @@ fn session_summaries(
             });
         entry.active_count += 1;
         entry.request_count += 1;
+        entry.project = request.project.clone().or(entry.project.clone());
         entry.provider = request.provider.clone().or(entry.provider.clone());
         entry.model = request.model.clone().or(entry.model.clone());
         entry.effort = request.effort.clone().or(entry.effort.clone());
@@ -1077,6 +1106,7 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input
             request_id: request_id.to_string(),
             session_id: Some(session_id.to_string()),
             session_seq: None,
+            project: None,
             provider: Some("codex".to_string()),
             model: Some("gpt-5.6-sol".to_string()),
             effort: None,
@@ -1218,6 +1248,7 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input
             Some(1),
             EndpointKind::Messages,
         );
+        monitor.project_resolved("r1", "example");
         monitor.provider_selected("r1", "codex", "gpt-5.5", None);
         monitor.request_completed("r1", 200, Some(10), Some(20));
         monitor.request_started(
@@ -1230,6 +1261,7 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input
         let state = monitor.snapshot();
         assert_eq!(state.sessions.len(), 1);
         assert_eq!(state.sessions[0].label(), "s1");
+        assert_eq!(state.sessions[0].project.as_deref(), Some("example"));
         assert_eq!(state.sessions[0].request_count, 2);
         assert_eq!(state.sessions[0].active_count, 1);
         assert_eq!(state.sessions[0].effort.as_deref(), Some("xhigh"));

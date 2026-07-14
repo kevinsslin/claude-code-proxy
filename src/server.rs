@@ -2,6 +2,7 @@ use crate::{
     anthropic::json_error,
     logging::{Logger, REDACT_KEYS, create_logger},
     monitor::{EndpointKind, MonitorHandle},
+    project,
     provider::RequestContext,
     registry::{Registry, normalize_incoming_model},
     session::{self, SessionState},
@@ -246,6 +247,12 @@ async fn dispatch_request(
             return response;
         }
     };
+
+    if let Some(project) = project::name_from_system(body.extra.get("system"))
+        && let Some(monitor) = state.monitor.as_ref()
+    {
+        monitor.project_resolved(&req_id, project);
+    }
 
     let model = match body.model.as_deref() {
         Some(model) => model,
