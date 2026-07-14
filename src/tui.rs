@@ -64,6 +64,22 @@ const SESSION_TABLE_HEADERS: [(&str, Alignment); 13] = [
     ("Status", Alignment::Left),
 ];
 
+const SESSION_FULL_TABLE_HEADERS: [(&str, Alignment); 13] = [
+    ("", Alignment::Left),
+    ("ID", Alignment::Left),
+    ("Project", Alignment::Left),
+    ("A", Alignment::Right),
+    ("R", Alignment::Right),
+    ("F", Alignment::Right),
+    ("Provider", Alignment::Left),
+    ("Model", Alignment::Left),
+    ("Effort", Alignment::Left),
+    ("In", Alignment::Right),
+    ("Out", Alignment::Right),
+    ("Rate", Alignment::Right),
+    ("Status", Alignment::Left),
+];
+
 const SESSION_WIDE_TABLE_HEADERS: [(&str, Alignment); 14] = [
     ("", Alignment::Left),
     ("ID", Alignment::Left),
@@ -725,7 +741,11 @@ fn session_value_width(header: &str, values: impl Iterator<Item = String>, maxim
         .min(usize::from(maximum)) as u16
 }
 
-fn session_table_widths(sessions: &[SessionSummary], show_sparkline: bool) -> Vec<Constraint> {
+fn session_table_widths(
+    sessions: &[SessionSummary],
+    show_sparkline: bool,
+    show_full_provider: bool,
+) -> Vec<Constraint> {
     let project_width = session_value_width(
         "Project",
         sessions
@@ -755,7 +775,11 @@ fn session_table_widths(sessions: &[SessionSummary], show_sparkline: bool) -> Ve
         4,
     );
     let provider_width = session_value_width(
-        if show_sparkline { "Provider" } else { "Prov" },
+        if show_full_provider {
+            "Provider"
+        } else {
+            "Prov"
+        },
         sessions
             .iter()
             .map(|session| session.provider.as_deref().unwrap_or("-").to_string()),
@@ -831,7 +855,15 @@ fn render_sessions(
     }
 
     let show_sparkline = area.width >= SESSION_SPARKLINE_MIN_WIDTH;
-    let widths = session_table_widths(sessions, show_sparkline);
+    let full_provider_widths = session_table_widths(sessions, show_sparkline, true);
+    let show_full_provider = show_sparkline
+        || table_column_width(area, &full_provider_widths, 7)
+            >= usize::from(SESSION_MODEL_WIDTH / 2);
+    let widths = if show_full_provider {
+        full_provider_widths
+    } else {
+        session_table_widths(sessions, false, false)
+    };
     let model_width = table_column_width(area, &widths, 7);
     let sparkline_width = show_sparkline
         .then(|| table_column_width(area, &widths, 12))
@@ -873,6 +905,8 @@ fn render_sessions(
     });
     let headers: &[(&str, Alignment)] = if show_sparkline {
         &SESSION_WIDE_TABLE_HEADERS
+    } else if show_full_provider {
+        &SESSION_FULL_TABLE_HEADERS
     } else {
         &SESSION_TABLE_HEADERS
     };
@@ -1479,6 +1513,13 @@ mod tests {
             ]
         );
         assert_eq!(
+            table_header_labels(&SESSION_FULL_TABLE_HEADERS),
+            [
+                "", "ID", "Project", "A", "R", "F", "Provider", "Model", "Effort", "In", "Out",
+                "Rate", "Status",
+            ]
+        );
+        assert_eq!(
             table_header_labels(&SESSION_WIDE_TABLE_HEADERS),
             [
                 "",
@@ -1571,7 +1612,7 @@ mod tests {
     #[test]
     fn session_columns_fit_displayed_content_before_allocating_flexible_space() {
         let state = mock_state();
-        let compact = session_table_widths(&state.sessions, false);
+        let compact = session_table_widths(&state.sessions, false, false);
         let area = Rect::new(0, 0, 120, 10);
 
         assert_eq!(table_column_width(area, &compact, 2), 18);
@@ -1583,7 +1624,11 @@ mod tests {
         assert!(table_column_width(area, &compact, 10) <= 4);
         assert!(table_column_width(area, &compact, 7) >= 10);
 
-        let wide = session_table_widths(&state.sessions, true);
+        let full_provider = session_table_widths(&state.sessions, false, true);
+        assert!(table_column_width(area, &full_provider, 7) >= 18);
+        assert!(table_column_width(Rect::new(0, 0, 90, 10), &full_provider, 7) < 18);
+
+        let wide = session_table_widths(&state.sessions, true, true);
         let wide_area = Rect::new(0, 0, 200, 10);
         assert_eq!(
             table_column_width(wide_area, &wide, 7),
