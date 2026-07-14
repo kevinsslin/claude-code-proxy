@@ -20,7 +20,9 @@ use ratatui::{
 use tokio::sync::oneshot;
 
 use crate::{
-    monitor::{ActiveRequest, CompletedRequest, MonitorHandle, MonitorState, SessionSummary},
+    monitor::{
+        ActiveRequest, CompletedRequest, MockMonitor, MonitorHandle, MonitorState, SessionSummary,
+    },
     paths,
     registry::Registry,
 };
@@ -113,11 +115,33 @@ pub fn run_monitor(
     handle: MonitorHandle,
     config: MonitorUiConfig<'_>,
 ) -> Result<(), anyhow::Error> {
+    run_monitor_loop(|| handle.snapshot(), config, None)
+}
+
+pub fn run_mock_monitor(port: u16, registry: &Registry) -> Result<(), anyhow::Error> {
+    let mut monitor = MockMonitor::new();
+    run_monitor_loop(
+        move || monitor.snapshot(),
+        MonitorUiConfig {
+            listen_url: "mock://tui-demo".to_string(),
+            port,
+            registry,
+            shutdown: None,
+        },
+        Some(mock_setup_text(port, registry)),
+    )
+}
+
+fn run_monitor_loop(
+    mut snapshot: impl FnMut() -> MonitorState,
+    config: MonitorUiConfig<'_>,
+    setup_text_override: Option<String>,
+) -> Result<(), anyhow::Error> {
     let mut terminal = setup_terminal()?;
     let _guard = TerminalGuard;
     let mut app = MonitorApp {
         listen_url: config.listen_url,
-        setup_text: setup_text(config.port, config.registry),
+        setup_text: setup_text_override.unwrap_or_else(|| setup_text(config.port, config.registry)),
         show_setup: false,
         show_help: false,
         detail: None,
@@ -129,7 +153,7 @@ pub fn run_monitor(
     };
 
     loop {
-        let state = handle.snapshot();
+        let state = snapshot();
         app.clamp_selection(state.sessions.len(), state.recent.len());
         app.tick = app.tick.wrapping_add(1);
         terminal.draw(|frame| render(frame, &mut app, &state))?;
@@ -1128,6 +1152,13 @@ fn render_setup_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, setup_text: 
     );
 }
 
+fn mock_setup_text(port: u16, registry: &Registry) -> String {
+    format!(
+        "Mock mode uses deterministic simulated monitor traffic.\nNo proxy server is listening.\nRun `claude-code-proxy serve` to start the proxy.\n\n{}",
+        setup_text(port, registry)
+    )
+}
+
 pub fn setup_text(port: u16, registry: &Registry) -> String {
     let grouped = registry.grouped_models();
     let model_summary = ["codex", "kimi", "cursor"]
@@ -1186,7 +1217,7 @@ mod tests {
     use ratatui::{backend::TestBackend, buffer::Buffer};
 
     use super::*;
-    use crate::monitor::EndpointKind;
+    use crate::monitor::{EndpointKind, mock_state};
 
     fn draw(width: u16, height: u16, render: impl FnOnce(&mut ratatui::Frame<'_>)) -> Buffer {
         let backend = TestBackend::new(width, height);
@@ -1451,6 +1482,51 @@ mod tests {
             render_events(frame, frame.area(), &completed_state.recent)
         });
         assert!(buffer_text(&events).contains("No events"));
+    }
+
+    #[test]
+    fn mock_state_renders_representative_panes_at_wide_width() {
+        let state = mock_state();
+        let mut app = MonitorApp {
+            listen_url: "mock://tui-demo".to_string(),
+            setup_text: String::new(),
+            show_setup: false,
+            show_help: false,
+            detail: None,
+            focus: FocusPane::Sessions,
+            selected: 0,
+            recent_selected: 0,
+            tick: 0,
+            shutdown: None,
+        };
+
+        let buffer = draw(180, 48, |frame| render(frame, &mut app, &state));
+        let text = buffer_text(&buffer);
+
+        assert!(text.contains("mock://tui-demo"), "{text}");
+        assert!(text.contains("claude-code-proxy"), "{text}");
+        assert!(text.contains("streaming"), "{text}");
+        assert!(text.contains("gpt-5.6-terra"), "{text}");
+        assert!(text.contains("upstream connection closed"), "{text}");
+    }
+
+    #[test]
+    fn mock_request_detail_exposes_error_and_capture_fields() {
+        let state = mock_state();
+        let failed = state
+            .recent
+            .iter()
+            .position(|request| request.request_id == "req-failed-kimi")
+            .unwrap();
+
+        let detail = draw(140, 22, |frame| {
+            render_request_detail(frame, frame.area(), &state, failed)
+        });
+        let text = buffer_text(&detail);
+
+        assert!(text.contains("req-failed-kimi"), "{text}");
+        assert!(text.contains("upstream connection closed"), "{text}");
+        assert!(text.contains("req-failed-kimi.json"), "{text}");
     }
 
     #[test]

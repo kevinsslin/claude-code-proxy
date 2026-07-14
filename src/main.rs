@@ -36,6 +36,8 @@ enum Commands {
         #[arg(long = "no-monitor", action = ArgAction::SetTrue)]
         no_monitor: bool,
     },
+    /// Open the monitor TUI with mock data and no proxy server
+    Demo,
     Models {
         #[arg(long)]
         full: bool,
@@ -133,6 +135,10 @@ fn main() -> Result<()> {
                     server_result.map_err(|err| anyhow::anyhow!(err))
                 }
             }
+        }
+        Commands::Demo => {
+            let registry = Registry::with_default_alias();
+            tui::run_mock_monitor(config::port(), &registry)
         }
         Commands::Models { full } => {
             print_models(&Registry::with_default_alias(), full);
@@ -282,6 +288,13 @@ mod tests {
     #[test]
     fn non_tty_stdout_selects_plain_mode() {
         assert_eq!(select_serve_mode(false, false), ServeMode::Plain);
+    }
+
+    #[test]
+    fn demo_command_parses_without_server_options() {
+        let cli = Cli::try_parse_from(["claude-code-proxy", "demo"]).unwrap();
+
+        assert!(matches!(cli.command, Some(Commands::Demo)));
     }
 
     #[test]

@@ -5,6 +5,10 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+mod mock;
+
+pub use mock::{MockMonitor, mock_state};
+
 const DEFAULT_RECENT_LIMIT: usize = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -120,6 +120,16 @@ requests, and error events. Use `--no-monitor` for plain terminal output.
 The proxy does not authenticate incoming clients, so protect any non-loopback
 binding with a firewall or an authenticating reverse proxy.
 
+To explore every monitor pane and interaction without starting the proxy, launch
+its deterministic simulated traffic:
+
+```sh
+claude-code-proxy demo
+```
+
+Resize the terminal to exercise the responsive request table. Press `?` for all
+shortcuts, `Enter` for session and request details, and `b` for the setup overlay.
+
 Installed via Homebrew, the proxy can also run as a background service that
 starts at login and restarts if it exits:
 
@@ -441,6 +451,7 @@ sequenceDiagram
 | Command                                             | Description                 |
 | --------------------------------------------------- | --------------------------- |
 | [`serve`](#serve)                                   | Start the proxy and monitor |
+| [`demo`](#demo)                                     | Open the TUI with mock data |
 | `codex auth login` / `device` / `status` / `logout` | Codex OAuth management      |
 | `kimi  auth login` / `status` / `logout`            | Kimi OAuth management       |
 | `cursor auth login` / `status` / `logout`           | Cursor OAuth management     |
@@ -476,6 +487,25 @@ The plain server banner prints the supported model to provider mapping on
 startup. One `serve` process dispatches to any provider based on the `model`
 field in each request. Requests whose model isn't registered with any provider
 are rejected with HTTP 400 listing the supported ids.
+
+---
+
+### `demo`
+
+Opens the real monitor TUI with deterministic simulated traffic and does not bind
+a port or start the proxy server. Requests advance through each active lifecycle
+status, token totals and throughput update continuously, completed requests enter
+the recent and event panes, and new sessions appear over time. The baseline data
+also covers successful and failed requests, sessions with and without project
+names, all providers, throughput fallbacks, HTTP errors, and optional request
+details.
+
+```sh
+claude-code-proxy demo
+```
+
+Use the normal monitor shortcuts and resize the terminal to inspect wide and
+compact request layouts.
 
 ---
 

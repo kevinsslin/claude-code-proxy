@@ -33,6 +33,17 @@ fn models_prints_all_providers() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn help_discovers_serverless_tui_demo() -> Result<(), Box<dyn std::error::Error>> {
+    Command::cargo_bin("claude-code-proxy")?
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(contains("demo"))
+        .stdout(contains("mock data and no proxy server"));
+    Ok(())
+}
+
+#[test]
 fn invalid_command_exits_two() -> Result<(), Box<dyn std::error::Error>> {
     Command::cargo_bin("claude-code-proxy")?
         .arg("definitely-not-a-command")
