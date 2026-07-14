@@ -23,6 +23,7 @@ pub enum LayoutTier {
     Emergency,
     Narrow,
     Medium,
+    Expanded,
     Wide,
 }
 
@@ -30,8 +31,9 @@ impl LayoutTier {
     pub fn for_outer_width(width: u16) -> Self {
         match width.saturating_sub(2) {
             0..=75 => Self::Emergency,
-            76..=97 => Self::Narrow,
-            98..=157 => Self::Medium,
+            76..=87 => Self::Narrow,
+            88..=117 => Self::Medium,
+            118..=151 => Self::Expanded,
             _ => Self::Wide,
         }
     }
@@ -86,7 +88,9 @@ mod tests {
     fn layout_tiers_cover_conventional_terminal_widths() {
         assert_eq!(LayoutTier::for_outer_width(77), LayoutTier::Emergency);
         assert_eq!(LayoutTier::for_outer_width(78), LayoutTier::Narrow);
-        assert_eq!(LayoutTier::for_outer_width(100), LayoutTier::Medium);
-        assert_eq!(LayoutTier::for_outer_width(160), LayoutTier::Wide);
+        assert_eq!(LayoutTier::for_outer_width(90), LayoutTier::Medium);
+        assert_eq!(LayoutTier::for_outer_width(120), LayoutTier::Expanded);
+        assert_eq!(LayoutTier::for_outer_width(153), LayoutTier::Expanded);
+        assert_eq!(LayoutTier::for_outer_width(154), LayoutTier::Wide);
     }
 }

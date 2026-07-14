@@ -769,7 +769,20 @@ fn session_columns(tier: LayoutTier, show_sparkline: bool) -> Vec<ColumnSpec<Ses
             ColumnSpec::flex(C::Activity, "Tokens/10s · 4k", Alignment::Left, 1),
             ColumnSpec::fixed(C::Status, "Status", Alignment::Left, STATUS_WIDTH),
         ],
-        (LayoutTier::Medium | LayoutTier::Wide, _) => vec![
+        (LayoutTier::Expanded | LayoutTier::Wide, _) => vec![
+            ColumnSpec::fixed(C::Marker, "", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Id, "ID", Alignment::Left, ID_WIDTH),
+            ColumnSpec::fixed(C::Project, "Project", Alignment::Left, PROJECT_MEDIUM_WIDTH),
+            ColumnSpec::fixed(C::Counts, "A/R/F", Alignment::Right, 7),
+            ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
+            ColumnSpec::flex(C::Model, "Model", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Effort, "Effort", Alignment::Left, EFFORT_WIDTH),
+            ColumnSpec::fixed(C::Input, "In", Alignment::Right, TOKEN_WIDTH),
+            ColumnSpec::fixed(C::Output, "Out", Alignment::Right, TOKEN_WIDTH),
+            ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
+            ColumnSpec::fixed(C::Status, "Status", Alignment::Left, STATUS_WIDTH),
+        ],
+        (LayoutTier::Medium, _) => vec![
             ColumnSpec::fixed(C::Marker, "", Alignment::Left, 1),
             ColumnSpec::fixed(C::Id, "ID", Alignment::Left, ID_WIDTH),
             ColumnSpec::fixed(C::Project, "Project", Alignment::Left, PROJECT_MEDIUM_WIDTH),
@@ -905,6 +918,18 @@ fn active_columns(tier: LayoutTier) -> Vec<ColumnSpec<ActiveColumn>> {
             ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
             ColumnSpec::fixed(C::Elapsed, "Elapsed", Alignment::Right, DURATION_WIDTH),
         ],
+        LayoutTier::Expanded => vec![
+            ColumnSpec::fixed(C::Started, "Started", Alignment::Left, TIME_WIDTH),
+            ColumnSpec::fixed(C::Status, "Status", Alignment::Left, STATUS_WIDTH),
+            ColumnSpec::fixed(C::Project, "Project", Alignment::Left, PROJECT_MEDIUM_WIDTH),
+            ColumnSpec::fixed(C::Session, "Session", Alignment::Left, ID_WIDTH),
+            ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
+            ColumnSpec::flex(C::Model, "Model", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Effort, "Effort", Alignment::Left, EFFORT_WIDTH),
+            ColumnSpec::fixed(C::Endpoint, "Endpoint", Alignment::Left, ENDPOINT_WIDTH),
+            ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
+            ColumnSpec::fixed(C::Elapsed, "Elapsed", Alignment::Right, DURATION_WIDTH),
+        ],
         LayoutTier::Medium => vec![
             ColumnSpec::fixed(C::Started, "Started", Alignment::Left, TIME_WIDTH),
             ColumnSpec::fixed(C::Status, "Status", Alignment::Left, STATUS_WIDTH),
@@ -1021,6 +1046,20 @@ fn recent_columns(tier: LayoutTier) -> Vec<ColumnSpec<RecentColumn>> {
             ColumnSpec::fixed(C::Input, "In", Alignment::Right, TOKEN_WIDTH),
             ColumnSpec::fixed(C::Output, "Out", Alignment::Right, TOKEN_WIDTH),
             ColumnSpec::flex(C::Details, "Details", Alignment::Left, 1),
+        ],
+        LayoutTier::Expanded => vec![
+            ColumnSpec::fixed(C::Finished, "Finished", Alignment::Left, TIME_WIDTH),
+            ColumnSpec::fixed(C::Code, "Code", Alignment::Right, CODE_WIDTH),
+            ColumnSpec::fixed(C::Project, "Project", Alignment::Left, PROJECT_MEDIUM_WIDTH),
+            ColumnSpec::fixed(C::Session, "Session", Alignment::Left, ID_WIDTH),
+            ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
+            ColumnSpec::flex(C::Model, "Model", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Effort, "Effort", Alignment::Left, EFFORT_WIDTH),
+            ColumnSpec::fixed(C::Latency, "Latency", Alignment::Right, DURATION_WIDTH),
+            ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
+            ColumnSpec::fixed(C::Input, "In", Alignment::Right, TOKEN_WIDTH),
+            ColumnSpec::fixed(C::Output, "Out", Alignment::Right, TOKEN_WIDTH),
+            ColumnSpec::fixed(C::Error, "!", Alignment::Right, ERROR_WIDTH),
         ],
         LayoutTier::Medium => vec![
             ColumnSpec::fixed(C::Finished, "Finished", Alignment::Left, TIME_WIDTH),
@@ -1149,6 +1188,14 @@ fn event_columns(tier: LayoutTier) -> Vec<ColumnSpec<EventColumn>> {
             ColumnSpec::fixed(C::Session, "Session", Alignment::Left, ID_WIDTH),
             ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
             ColumnSpec::fixed(C::Model, "Model", Alignment::Left, MODEL_WIDE_WIDTH),
+            ColumnSpec::flex(C::Message, "Message", Alignment::Left, 1),
+        ],
+        LayoutTier::Expanded => vec![
+            ColumnSpec::fixed(C::Time, "Time", Alignment::Left, TIME_WIDTH),
+            ColumnSpec::fixed(C::Code, "Code", Alignment::Right, CODE_WIDTH),
+            ColumnSpec::fixed(C::Project, "Project", Alignment::Left, PROJECT_MEDIUM_WIDTH),
+            ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
+            ColumnSpec::fixed(C::Model, "Model", Alignment::Left, MODEL_MEDIUM_WIDTH),
             ColumnSpec::flex(C::Message, "Message", Alignment::Left, 1),
         ],
         LayoutTier::Medium => vec![
@@ -1749,23 +1796,27 @@ mod tests {
     fn responsive_schemas_fit_their_minimum_terminal_widths() {
         assert!(fixed_budget(&session_columns(LayoutTier::Emergency, false)) <= 75);
         assert!(fixed_budget(&session_columns(LayoutTier::Narrow, false)) <= 76);
-        assert!(fixed_budget(&session_columns(LayoutTier::Medium, false)) <= 98);
+        assert!(fixed_budget(&session_columns(LayoutTier::Medium, false)) <= 88);
+        assert!(fixed_budget(&session_columns(LayoutTier::Expanded, false)) <= 118);
         assert!(fixed_budget(&session_columns(LayoutTier::Wide, true)) <= 168);
 
         assert!(fixed_budget(&active_columns(LayoutTier::Emergency)) <= 75);
         assert!(fixed_budget(&active_columns(LayoutTier::Narrow)) <= 76);
-        assert!(fixed_budget(&active_columns(LayoutTier::Medium)) <= 98);
-        assert!(fixed_budget(&active_columns(LayoutTier::Wide)) <= 158);
+        assert!(fixed_budget(&active_columns(LayoutTier::Medium)) <= 88);
+        assert!(fixed_budget(&active_columns(LayoutTier::Expanded)) <= 118);
+        assert!(fixed_budget(&active_columns(LayoutTier::Wide)) <= 152);
 
         assert!(fixed_budget(&recent_columns(LayoutTier::Emergency)) <= 75);
         assert!(fixed_budget(&recent_columns(LayoutTier::Narrow)) <= 76);
-        assert!(fixed_budget(&recent_columns(LayoutTier::Medium)) <= 98);
-        assert!(fixed_budget(&recent_columns(LayoutTier::Wide)) <= 158);
+        assert!(fixed_budget(&recent_columns(LayoutTier::Medium)) <= 88);
+        assert!(fixed_budget(&recent_columns(LayoutTier::Expanded)) <= 118);
+        assert!(fixed_budget(&recent_columns(LayoutTier::Wide)) <= 152);
 
         assert!(fixed_budget(&event_columns(LayoutTier::Emergency)) <= 75);
         assert!(fixed_budget(&event_columns(LayoutTier::Narrow)) <= 76);
-        assert!(fixed_budget(&event_columns(LayoutTier::Medium)) <= 98);
-        assert!(fixed_budget(&event_columns(LayoutTier::Wide)) <= 158);
+        assert!(fixed_budget(&event_columns(LayoutTier::Medium)) <= 88);
+        assert!(fixed_budget(&event_columns(LayoutTier::Expanded)) <= 118);
+        assert!(fixed_budget(&event_columns(LayoutTier::Wide)) <= 152);
     }
 
     #[test]
@@ -1788,13 +1839,19 @@ mod tests {
         assert!(narrow.contains("Rate"), "{narrow}");
         assert!(!narrow.contains("Provider"), "{narrow}");
 
-        let medium = render_at(100);
+        let medium = render_at(90);
         assert!(medium.contains("Provider"), "{medium}");
         assert!(medium.contains("Model"), "{medium}");
         assert!(medium.contains("Endpoint"), "{medium}");
         assert!(!medium.contains("Project"), "{medium}");
 
-        let wide = render_at(160);
+        let expanded = render_at(120);
+        assert!(expanded.contains("Project"), "{expanded}");
+        assert!(expanded.contains("Session"), "{expanded}");
+        assert!(expanded.contains("Endpoint"), "{expanded}");
+        assert!(!expanded.contains("In"), "{expanded}");
+
+        let wide = render_at(154);
         assert!(wide.contains("Project"), "{wide}");
         assert!(wide.contains("Session"), "{wide}");
         assert!(wide.contains("In"), "{wide}");
@@ -1807,6 +1864,7 @@ mod tests {
             LayoutTier::Emergency,
             LayoutTier::Narrow,
             LayoutTier::Medium,
+            LayoutTier::Expanded,
             LayoutTier::Wide,
         ] {
             let sessions = session_columns(tier, tier == LayoutTier::Wide);
