@@ -248,8 +248,10 @@ async fn dispatch_request(
         }
     };
 
-    if let Some(project) = project::name_from_system(body.extra.get("system"))
-        && let Some(monitor) = state.monitor.as_ref()
+    if let Some(project) = project::name_from_request(
+        body.extra.get("system"),
+        body.messages.iter().rev().map(|message| &message.content),
+    ) && let Some(monitor) = state.monitor.as_ref()
     {
         monitor.project_resolved(&req_id, project);
     }

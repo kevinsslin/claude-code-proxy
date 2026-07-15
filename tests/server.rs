@@ -267,7 +267,7 @@ async fn monitor_records_successful_request_events() {
                 .uri("/v1/messages/count_tokens")
                 .header("content-type", "application/json")
                 .body(body_string(
-                    r##"{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}],"system":"# Environment\n - Primary working directory: /projects/example","output_config":{"effort":"high"}}"##,
+                    r##"{"model":"gpt-5.4","messages":[{"role":"user","content":[{"type":"text","text":"hello"},{"type":"text","text":"<system-reminder>\n# Environment\n - Primary working directory: /projects/example\n</system-reminder>"}]}],"output_config":{"effort":"high"}}"##,
                 ))
                 .unwrap(),
         )

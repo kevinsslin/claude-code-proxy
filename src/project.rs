@@ -9,22 +9,33 @@ const WORKING_DIRECTORY_PREFIXES: [&str; 3] = [
 ];
 
 pub fn name_from_system(system: Option<&Value>) -> Option<String> {
-    system_text(system)
-        .lines()
-        .find_map(working_directory_from_line)
-        .and_then(name_from_working_directory)
+    system.and_then(name_from_value)
 }
 
-fn system_text(system: Option<&Value>) -> String {
-    match system {
-        Some(Value::String(text)) => text.clone(),
-        Some(Value::Array(blocks)) => blocks
-            .iter()
-            .filter_map(|block| block.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
+pub fn name_from_request<'a>(
+    system: Option<&Value>,
+    message_contents: impl IntoIterator<Item = &'a Value>,
+) -> Option<String> {
+    name_from_system(system).or_else(|| message_contents.into_iter().find_map(name_from_value))
+}
+
+fn name_from_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => name_from_text(text),
+        Value::Array(values) => values.iter().find_map(name_from_value),
+        Value::Object(object) => object
+            .get("text")
+            .and_then(Value::as_str)
+            .and_then(name_from_text)
+            .or_else(|| object.get("content").and_then(name_from_value)),
+        _ => None,
     }
+}
+
+fn name_from_text(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(working_directory_from_line)
+        .and_then(name_from_working_directory)
 }
 
 fn working_directory_from_line(line: &str) -> Option<&str> {
@@ -107,6 +118,19 @@ mod tests {
         let system = json!("<env>\nWorking directory: /home/user/example\n</env>");
 
         assert_eq!(name_from_system(Some(&system)).as_deref(), Some("example"));
+    }
+
+    #[test]
+    fn reads_working_directory_from_message_system_reminder() {
+        let content = json!([
+            {"type": "text", "text": "hello"},
+            {"type": "text", "text": "<system-reminder>\n# Environment\n - Primary working directory: /home/user/example\n</system-reminder>"}
+        ]);
+
+        assert_eq!(
+            name_from_request(None, [&content]).as_deref(),
+            Some("example")
+        );
     }
 
     #[test]
