@@ -774,9 +774,9 @@ enum SessionColumn {
     Status,
 }
 
-fn session_columns(tier: LayoutTier, show_sparkline: bool) -> Vec<ColumnSpec<SessionColumn>> {
+fn session_columns(tier: LayoutTier, show_full_sparkline: bool) -> Vec<ColumnSpec<SessionColumn>> {
     use SessionColumn as C;
-    match (tier, show_sparkline) {
+    match (tier, show_full_sparkline) {
         (LayoutTier::Wide, true) => vec![
             ColumnSpec::fixed(C::Marker, "", Alignment::Left, 1),
             ColumnSpec::fixed(C::Id, "ID", Alignment::Left, ID_WIDTH),
@@ -799,11 +799,12 @@ fn session_columns(tier: LayoutTier, show_sparkline: bool) -> Vec<ColumnSpec<Ses
             ColumnSpec::fixed(C::Project, "Project", Alignment::Left, PROJECT_MEDIUM_WIDTH),
             ColumnSpec::fixed(C::Counts, "A/R/F", Alignment::Right, 7),
             ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
-            ColumnSpec::flex(C::Model, "Model", Alignment::Left, 1),
+            ColumnSpec::fixed(C::Model, "Model", Alignment::Left, MODEL_NARROW_WIDTH),
             ColumnSpec::fixed(C::Effort, "Effort", Alignment::Left, EFFORT_WIDTH),
             ColumnSpec::fixed(C::Input, "In", Alignment::Right, TOKEN_WIDTH),
             ColumnSpec::fixed(C::Output, "Out", Alignment::Right, TOKEN_WIDTH),
             ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
+            ColumnSpec::flex(C::Activity, "Tokens/10s", Alignment::Left, 1),
             ColumnSpec::fixed(C::Status, "Status", Alignment::Left, STATUS_WIDTH),
         ],
         (LayoutTier::Medium, _) => vec![
@@ -814,6 +815,7 @@ fn session_columns(tier: LayoutTier, show_sparkline: bool) -> Vec<ColumnSpec<Ses
             ColumnSpec::fixed(C::Provider, "Provider", Alignment::Left, PROVIDER_WIDTH),
             ColumnSpec::flex(C::Model, "Model", Alignment::Left, 1),
             ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
+            ColumnSpec::fixed(C::Activity, "Tok/10s", Alignment::Left, 8),
             ColumnSpec::fixed(C::Status, "Status", Alignment::Left, STATUS_WIDTH),
         ],
         (LayoutTier::Narrow, _) => vec![
@@ -823,6 +825,7 @@ fn session_columns(tier: LayoutTier, show_sparkline: bool) -> Vec<ColumnSpec<Ses
             ColumnSpec::fixed(C::Counts, "A/R/F", Alignment::Right, 7),
             ColumnSpec::flex(C::Target, "Target", Alignment::Left, 1),
             ColumnSpec::fixed(C::Rate, "Rate", Alignment::Right, RATE_WIDTH),
+            ColumnSpec::fixed(C::Activity, "Trend", Alignment::Left, 6),
             ColumnSpec::fixed(C::Status, "Status", Alignment::Left, STATUS_WIDTH),
         ],
         (LayoutTier::Emergency, _) => vec![
@@ -847,8 +850,8 @@ fn render_sessions(
     }
 
     let tier = LayoutTier::for_outer_width(area.width);
-    let show_sparkline = tier == LayoutTier::Wide && area.width >= SESSION_SPARKLINE_MIN_WIDTH;
-    let columns = session_columns(tier, show_sparkline);
+    let show_full_sparkline = tier == LayoutTier::Wide && area.width >= SESSION_SPARKLINE_MIN_WIDTH;
+    let columns = session_columns(tier, show_full_sparkline);
     let widths = column_constraints(&columns);
     let now = SystemTime::now();
     let rows = sessions.iter().enumerate().map(|(index, session)| {
@@ -2111,7 +2114,7 @@ mod tests {
     }
 
     #[test]
-    fn session_sparkline_appears_only_when_space_allows_and_expands() {
+    fn session_sparkline_appears_at_medium_width_and_expands() {
         let monitor = MonitorHandle::new(10);
         for (index, tokens) in [1_000, 2_000, 4_000].into_iter().enumerate() {
             let request_id = format!("request-{index}");
@@ -2125,33 +2128,37 @@ mod tests {
             monitor.request_completed(&request_id, 200, Some(100), Some(tokens));
         }
         let state = monitor.snapshot();
-
-        let narrow = draw(SESSION_SPARKLINE_MIN_WIDTH - 1, 8, |frame| {
-            render_sessions(frame, frame.area(), &state.sessions, 0, true)
-        });
-        let wide = draw(SESSION_SPARKLINE_MIN_WIDTH, 8, |frame| {
-            render_sessions(frame, frame.area(), &state.sessions, 0, true)
-        });
-        let wider = draw(SESSION_SPARKLINE_MIN_WIDTH + 30, 8, |frame| {
-            render_sessions(frame, frame.area(), &state.sessions, 0, true)
-        });
-        let narrow_text = buffer_text(&narrow);
-        let wide_text = buffer_text(&wide);
-        let wider_text = buffer_text(&wider);
+        let render_at = |width| {
+            let buffer = draw(width, 8, |frame| {
+                render_sessions(frame, frame.area(), &state.sessions, 0, true)
+            });
+            buffer_text(&buffer)
+        };
         let spark_chars = |text: &str| {
             text.chars()
                 .filter(|ch| matches!(ch, '▁' | '▂' | '▃' | '▄' | '▅' | '▆' | '▇' | '█'))
                 .count()
         };
 
-        assert!(!narrow_text.contains("Tokens/10s"), "{narrow_text}");
-        assert_eq!(spark_chars(&narrow_text), 0, "{narrow_text}");
-        assert!(wide_text.contains("Tokens/10s"), "{wide_text}");
-        assert!(spark_chars(&wide_text) > 0, "{wide_text}");
-        assert!(
-            wider_text.find("█ completed") > wide_text.find("█ completed"),
-            "{wider_text}"
-        );
+        let emergency = render_at(77);
+        assert!(!emergency.contains("Trend"), "{emergency}");
+        assert_eq!(spark_chars(&emergency), 0, "{emergency}");
+
+        let narrow = render_at(78);
+        assert!(narrow.contains("Trend"), "{narrow}");
+        assert!(spark_chars(&narrow) > 0, "{narrow}");
+
+        let medium = render_at(90);
+        assert!(medium.contains("Tok/10s"), "{medium}");
+        assert!(spark_chars(&medium) > 0, "{medium}");
+
+        let expanded = render_at(120);
+        assert!(expanded.contains("Tokens/10s"), "{expanded}");
+        assert!(spark_chars(&expanded) > 0, "{expanded}");
+
+        let wide = render_at(SESSION_SPARKLINE_MIN_WIDTH);
+        assert!(wide.contains("Tokens/10s · 4k"), "{wide}");
+        assert!(spark_chars(&wide) > 0, "{wide}");
     }
 
     #[test]
