@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.20 (2026-07-15)
+
+- The monitor reliably shows project names for Claude Code sessions and keeps
+  them visible as requests are sequenced.
+- Keyboard navigation scrolls session and recent-request tables to keep the
+  selected row visible.
+- Pressing `q` asks for confirmation before gracefully shutting down the proxy.
+- Compact monitor layouts show more project, provider, model, effort, and token
+  details without requiring a wider terminal.
+
 ## v0.1.19 (2026-07-15)
 
 - The monitor shows project and session context at more terminal widths while
