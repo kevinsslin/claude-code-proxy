@@ -159,6 +159,38 @@ async fn dispatch_request(
         .get("x-claude-code-session-id")
         .and_then(|value| value.to_str().ok())
         .map(std::string::ToString::to_string);
+    if !count_tokens {
+        let agent_id = headers
+            .get("x-claude-code-agent-id")
+            .and_then(|value| value.to_str().ok());
+        let parent_id = headers
+            .get("x-claude-code-parent-agent-id")
+            .and_then(|value| value.to_str().ok());
+        let max = crate::agent_depth::max_depth_from_env();
+        if let Err(depth) =
+            crate::agent_depth::check(max, session_id.as_deref(), agent_id, parent_id)
+        {
+            let max = max.unwrap_or_default();
+            log.warn(
+                "agent depth cap exceeded",
+                Some(serde_json::Map::from_iter([
+                    ("reqId".to_string(), json!(&req_id)),
+                    ("depth".to_string(), json!(depth)),
+                    ("maxDepth".to_string(), json!(max)),
+                    ("agentId".to_string(), json!(agent_id)),
+                    ("parentAgentId".to_string(), json!(parent_id)),
+                ])),
+            );
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                format!(
+                    "Agent nesting depth {depth} exceeds this proxy's CCP_MAX_AGENT_DEPTH={max}. \
+                     Do the work in the current agent instead of spawning deeper agents."
+                ),
+            );
+        }
+    }
     if let Some(monitor) = state.monitor.as_ref() {
         monitor.request_started(&req_id, session_id.clone(), None, endpoint);
     }
