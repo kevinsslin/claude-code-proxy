@@ -1355,16 +1355,6 @@ fn rate_limit_reached_event() -> String {
     .to_string()
 }
 
-// KNOWN BUG (upstream PR #30 territory): a rate limit at stream start is
-// classified as a generic upstream failure and returned as 502, so Claude
-// Code treats quota exhaustion as a server error and re-drives it. It should
-// be a clean 429 + Retry-After. Un-ignore once the classification is fixed.
-// Root cause (traced 2026-07-19): the codex.rate_limits{limit_reached} signal
-// is lost to the race with the subsequent WebSocket close, so the proxy sees a
-// generic connection reset (status 0) and maps it to 502 api_error instead of a
-// clean 429 rate_limit_error. Un-ignore once the rate-limit signal is
-// prioritized over the transport close.
-#[ignore = "known bug: quota exhaustion at stream start returns 502, not 429"]
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn fault_rate_limit_at_stream_start_returns_429_fast_without_retry_storm() {
