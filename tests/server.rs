@@ -361,6 +361,13 @@ async fn monitor_records_unknown_model_failure() {
 
 #[tokio::test]
 async fn usage_endpoint_serves_latest_codex_rate_limit_snapshot() {
+    // Isolate the persisted-snapshot file so a prior run's quota does not
+    // leak into the empty-state assertion.
+    let state = tempfile::tempdir().unwrap();
+    let prev_state = std::env::var_os("XDG_STATE_HOME");
+    // SAFETY: single-threaded test; restored below.
+    unsafe { std::env::set_var("XDG_STATE_HOME", state.path()) };
+
     let app = app(Arc::new(Registry::with_default_alias()));
     let empty = app
         .clone()
@@ -414,4 +421,12 @@ async fn usage_endpoint_serves_latest_codex_rate_limit_snapshot() {
             .and_then(Value::as_str)
             .is_some()
     );
+
+    // SAFETY: single-threaded test; restore the prior value.
+    unsafe {
+        match prev_state {
+            Some(value) => std::env::set_var("XDG_STATE_HOME", value),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
+    }
 }
