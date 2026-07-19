@@ -1550,3 +1550,115 @@ async fn fault_disconnect_after_output_does_not_replay_request() {
         "after semantic output the request must not be replayed"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Fault injection: more transport faults (overload, malformed, no-reset)
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn fault_overload_at_stream_start_maps_to_overloaded_error() {
+    let _guard = env_lock();
+    let config = TempDir::new().unwrap();
+    write_auth(config.path(), "codex");
+
+    let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let upstream = spawn_websocket_fault_upstream(connections.clone(), |_| {
+        vec![
+            json!({
+                "type": "error",
+                "status": 529,
+                "error": {"type": "overloaded_error", "message": "overloaded"}
+            })
+            .to_string(),
+        ]
+    })
+    .await;
+
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
+
+    let response = call_messages("gpt-5.5").await;
+    // 529 is retryable, so after the retry budget it surfaces as an
+    // overloaded_error, never a silent hang or a misclassified 500.
+    let status = response.status();
+    let value: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(status, StatusCode::from_u16(529).unwrap());
+    assert_eq!(value["error"]["type"], "overloaded_error");
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn fault_malformed_frame_does_not_crash_the_stream() {
+    let _guard = env_lock();
+    let config = TempDir::new().unwrap();
+    write_auth(config.path(), "codex");
+
+    let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // A garbage frame, then a normal completion: the proxy must tolerate the
+    // unparseable frame and still deliver the real response.
+    let upstream = spawn_websocket_fault_upstream(connections.clone(), |_| {
+        vec![
+            "this is not json".to_string(),
+            r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_up"}}"#.to_string(),
+            r#"{"type":"response.output_text.delta","output_index":0,"delta":"survived garbage"}"#.to_string(),
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}"#.to_string(),
+            r#"{"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":5,"output_tokens":2}}}"#.to_string(),
+        ]
+    })
+    .await;
+
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
+
+    let response = call_messages("gpt-5.5").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(value["content"][0]["text"], "survived garbage");
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn fault_rate_limit_without_reset_still_returns_429() {
+    let _guard = env_lock();
+    let config = TempDir::new().unwrap();
+    write_auth(config.path(), "codex");
+
+    let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // limit_reached with no primary/reset_after_seconds: still a clean 429,
+    // just without a precise Retry-After.
+    let upstream = spawn_websocket_fault_upstream(connections.clone(), |_| {
+        vec![
+            json!({"type": "codex.rate_limits", "rate_limits": {"limit_reached": true}})
+                .to_string(),
+        ]
+    })
+    .await;
+
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
+
+    let response = call_messages("gpt-5.5").await;
+    let status = response.status();
+    let value: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(value["error"]["type"], "rate_limit_error");
+}
