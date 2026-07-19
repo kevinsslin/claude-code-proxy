@@ -11,7 +11,7 @@ use crate::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::State,
+    extract::{Query, State},
     http::{Request, StatusCode},
     response::Response,
     routing::{get, post},
@@ -105,6 +105,7 @@ pub fn app_with_monitor(registry: Arc<Registry>, monitor: Option<MonitorHandle>)
         .route("/healthz", get(healthz))
         .route("/v1/messages", post(handler_messages))
         .route("/v1/messages/count_tokens", post(handler_count_tokens))
+        .route("/v1/models", get(handler_models))
         .fallback(fallback_handler)
         .with_state(state)
 }
@@ -117,6 +118,44 @@ struct AppState {
 
 async fn healthz() -> Json<serde_json::Value> {
     Json(json!({ "ok": true }))
+}
+
+#[derive(serde::Deserialize)]
+struct ModelsQuery {
+    limit: Option<usize>,
+}
+
+/// Anthropic-shaped model listing so Claude Code's gateway model discovery
+/// (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`) finds the proxy's models.
+/// Claude Code only adds entries whose id starts with `claude` or `anthropic`,
+/// so the Anthropic-style aliases are what surface in its `/model` picker;
+/// raw provider ids are still listed for other Anthropic-compatible clients.
+async fn handler_models(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ModelsQuery>,
+) -> Json<serde_json::Value> {
+    let mut data: Vec<Value> = state
+        .registry
+        .all_supported_models()
+        .into_iter()
+        .map(|(model, provider)| {
+            json!({
+                "type": "model",
+                "id": model,
+                "display_name": format!("{model} ({provider})"),
+            })
+        })
+        .collect();
+    let has_more = query.limit.is_some_and(|limit| data.len() > limit);
+    if let Some(limit) = query.limit {
+        data.truncate(limit);
+    }
+    Json(json!({
+        "data": data,
+        "has_more": has_more,
+        "first_id": data.first().and_then(|entry| entry.get("id")).cloned(),
+        "last_id": data.last().and_then(|entry| entry.get("id")).cloned(),
+    }))
 }
 
 async fn handler_messages(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response {

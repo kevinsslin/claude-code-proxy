@@ -358,3 +358,78 @@ async fn monitor_records_unknown_model_failure() {
     assert!(error.starts_with("Unknown model \"not-a-model\""));
     assert!(error.contains("Supported:"));
 }
+
+async fn get_models(app: axum::Router, uri: &str) -> (StatusCode, Value) {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    (status, value)
+}
+
+#[tokio::test]
+async fn models_endpoint_lists_supported_models() {
+    let app = app(Arc::new(Registry::with_default_alias()));
+    let (status, value) = get_models(app, "/v1/models").await;
+
+    assert_eq!(status, StatusCode::OK);
+    let data = value["data"].as_array().unwrap();
+    assert!(!data.is_empty());
+    let ids: Vec<&str> = data.iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&"gpt-5.6-sol"));
+    for entry in data {
+        assert_eq!(entry["type"], "model");
+        assert!(entry["display_name"].as_str().is_some());
+    }
+    assert_eq!(value["has_more"], json!(false));
+    assert_eq!(value["first_id"], data[0]["id"]);
+    assert_eq!(value["last_id"], data[data.len() - 1]["id"]);
+}
+
+#[tokio::test]
+async fn models_endpoint_includes_claude_prefixed_aliases_for_discovery() {
+    // Claude Code's gateway model discovery ignores ids that don't start with
+    // "claude" or "anthropic", so the alias entries are what make
+    // CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 useful at all.
+    let app = app(Arc::new(Registry::with_default_alias()));
+    let (status, value) = get_models(app, "/v1/models?limit=1000").await;
+
+    assert_eq!(status, StatusCode::OK);
+    let ids: Vec<&str> = value["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert!(ids.iter().any(|id| id.starts_with("claude-")));
+}
+
+#[tokio::test]
+async fn models_endpoint_respects_limit() {
+    let app = app(Arc::new(Registry::with_default_alias()));
+    let (status, value) = get_models(app, "/v1/models?limit=2").await;
+
+    assert_eq!(status, StatusCode::OK);
+    let data = value["data"].as_array().unwrap();
+    assert_eq!(data.len(), 2);
+    assert_eq!(value["has_more"], json!(true));
+    assert_eq!(value["last_id"], data[1]["id"]);
+}
+
+#[tokio::test]
+async fn models_endpoint_tolerates_unknown_query_params() {
+    let app = app(Arc::new(Registry::with_default_alias()));
+    let (status, _) = get_models(app, "/v1/models?limit=1000&after_id=x").await;
+    assert_eq!(status, StatusCode::OK);
+}
