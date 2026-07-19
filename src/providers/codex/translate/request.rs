@@ -16,7 +16,7 @@ use super::reasoning_signature::decode_reasoning_signature;
 // Types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Effort {
     None,
@@ -266,6 +266,37 @@ fn reasoning_summary_requested(summary: Option<&str>) -> bool {
     !matches!(summary, Some("off" | "none"))
 }
 
+// ---------------------------------------------------------------------------
+// Compaction fast path
+// ---------------------------------------------------------------------------
+
+/// Stable marker Claude Code puts in the system prompt of every compaction
+/// request (both manual `/compact` and auto-compact use the same prompt).
+const COMPACT_SYSTEM_MARKER: &str =
+    "You are a helpful AI assistant tasked with summarizing conversations";
+
+fn is_compact_request(instructions: Option<&str>) -> bool {
+    instructions.is_some_and(|text| text.contains(COMPACT_SYSTEM_MARKER))
+}
+
+/// Reasoning-effort cap applied to compaction requests, or None when the
+/// fast path is disabled. Summarization is extraction, not problem solving:
+/// native Claude Code compacts without extended thinking, so burning
+/// medium/high reasoning on a 200k-token summary only adds latency. The cap
+/// never raises effort — a request already below it is left alone.
+fn compact_effort_cap() -> Option<Effort> {
+    compact_effort_cap_from(std::env::var("CCP_COMPACT_EFFORT").ok().as_deref())
+}
+
+fn compact_effort_cap_from(raw: Option<&str>) -> Option<Effort> {
+    match raw {
+        None | Some("") => Some(Effort::Low),
+        Some("off") => None,
+        Some("none") => Some(Effort::None),
+        Some(other) => to_codex_effort(Some(other)).or(Some(Effort::Low)),
+    }
+}
+
 const VALID_SERVICE_TIERS: &[&str] = &["fast", "priority", "flex"];
 
 fn normalize_service_tier(tier: &str) -> Result<ServiceTier, anyhow::Error> {
@@ -331,6 +362,7 @@ pub fn translate_request(
     opts: TranslateOptions,
 ) -> Result<ResponsesRequest, anyhow::Error> {
     let instructions = flatten_system_text(req.extra.get("system"));
+    let is_compact = is_compact_request(instructions.as_deref());
     let input = build_input(req);
     let tools = read_tools(req)?;
     let tool_choice = map_tool_choice(req)?;
@@ -426,7 +458,13 @@ pub fn translate_request(
 
     let effort = read_effort(req)?;
     let codex_effort = to_codex_effort(effort);
-    let resolved_effort = resolve_effort(codex_effort)?;
+    let mut resolved_effort = resolve_effort(codex_effort)?;
+    if is_compact
+        && let Some(cap) = compact_effort_cap()
+        && resolved_effort.as_ref().is_some_and(|e| *e > cap)
+    {
+        resolved_effort = Some(cap);
+    }
     if resolved_effort.is_some() || opts.use_responses_lite {
         let summary = if resolved_effort.is_some()
             && reasoning_summary_requested(config::codex_reasoning_summary().as_deref())
@@ -1272,6 +1310,87 @@ mod tests {
     fn translate_effort_override_max_maps_to_max() {
         let effort = resolve_effort_override(Some(Effort::Low), Some("max")).unwrap();
         assert!(matches!(effort, Some(Effort::Max)));
+    }
+
+    #[test]
+    fn compact_request_detected_from_system_marker() {
+        assert!(is_compact_request(Some(
+            "You are a helpful AI assistant tasked with summarizing conversations."
+        )));
+        assert!(!is_compact_request(Some("You are Claude Code.")));
+        assert!(!is_compact_request(None));
+    }
+
+    #[test]
+    fn compact_effort_cap_parses_env_values() {
+        assert!(matches!(compact_effort_cap_from(None), Some(Effort::Low)));
+        assert!(matches!(
+            compact_effort_cap_from(Some("")),
+            Some(Effort::Low)
+        ));
+        assert!(compact_effort_cap_from(Some("off")).is_none());
+        assert!(matches!(
+            compact_effort_cap_from(Some("none")),
+            Some(Effort::None)
+        ));
+        assert!(matches!(
+            compact_effort_cap_from(Some("medium")),
+            Some(Effort::Medium)
+        ));
+        // Unrecognized values fall back to the safe default.
+        assert!(matches!(
+            compact_effort_cap_from(Some("bogus")),
+            Some(Effort::Low)
+        ));
+    }
+
+    #[test]
+    fn compact_request_downgrades_effort_to_cap() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [{"role":"user", "content":"summarize"}],
+            "system": "You are a helpful AI assistant tasked with summarizing conversations.",
+            "output_config": {"effort": "medium"}
+        }))
+        .unwrap();
+        let out = translate_request(&req, opts()).unwrap();
+        assert!(matches!(out.reasoning.unwrap().effort, Some(Effort::Low)));
+    }
+
+    #[test]
+    fn compact_cap_never_raises_effort() {
+        // A compact request already at or below the cap is left alone.
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [{"role":"user", "content":"summarize"}],
+            "system": "You are a helpful AI assistant tasked with summarizing conversations.",
+            "output_config": {"effort": "low"}
+        }))
+        .unwrap();
+        let out = translate_request(&req, opts()).unwrap();
+        assert!(matches!(out.reasoning.unwrap().effort, Some(Effort::Low)));
+    }
+
+    #[test]
+    fn non_compact_request_keeps_requested_effort() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "gpt-5.5",
+            "messages": [{"role":"user", "content":"hello"}],
+            "system": "You are Claude Code.",
+            "output_config": {"effort": "high"}
+        }))
+        .unwrap();
+        let out = translate_request(&req, opts()).unwrap();
+        assert!(matches!(out.reasoning.unwrap().effort, Some(Effort::High)));
+    }
+
+    #[test]
+    fn effort_ordering_matches_variant_order() {
+        assert!(Effort::None < Effort::Low);
+        assert!(Effort::Low < Effort::Medium);
+        assert!(Effort::Medium < Effort::High);
+        assert!(Effort::High < Effort::Xhigh);
+        assert!(Effort::Xhigh < Effort::Max);
     }
 
     #[test]
