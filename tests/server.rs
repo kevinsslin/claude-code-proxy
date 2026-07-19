@@ -433,3 +433,60 @@ async fn models_endpoint_tolerates_unknown_query_params() {
     let (status, _) = get_models(app, "/v1/models?limit=1000&after_id=x").await;
     assert_eq!(status, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn usage_endpoint_serves_latest_codex_rate_limit_snapshot() {
+    let app = app(Arc::new(Registry::with_default_alias()));
+    let empty = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/usage")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(empty.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["codex"], Value::Null);
+
+    claude_code_proxy::providers::codex::rate_limits::record_event(&json!({
+        "type": "codex.rate_limits",
+        "rate_limits": {
+            "limit_reached": false,
+            "primary": {"used_percent": 16.0, "window_minutes": 10080},
+            "secondary": null
+        }
+    }));
+
+    let populated = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/usage")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(populated.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(populated.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        value.pointer("/codex/rate_limits/primary/used_percent"),
+        Some(&json!(16.0))
+    );
+    assert!(
+        value
+            .pointer("/codex/captured_at")
+            .and_then(Value::as_str)
+            .is_some()
+    );
+}

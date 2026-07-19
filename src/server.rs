@@ -106,6 +106,7 @@ pub fn app_with_monitor(registry: Arc<Registry>, monitor: Option<MonitorHandle>)
         .route("/v1/messages", post(handler_messages))
         .route("/v1/messages/count_tokens", post(handler_count_tokens))
         .route("/v1/models", get(handler_models))
+        .route("/usage", get(handler_usage))
         .fallback(fallback_handler)
         .with_state(state)
 }
@@ -155,6 +156,16 @@ async fn handler_models(
         "has_more": has_more,
         "first_id": data.first().and_then(|entry| entry.get("id")).cloned(),
         "last_id": data.last().and_then(|entry| entry.get("id")).cloned(),
+    }))
+}
+
+/// Latest upstream quota snapshot per provider. Codex pushes a
+/// `codex.rate_limits` snapshot on responses; this serves the most recent
+/// one so operators can check remaining quota before starting a long run
+/// (`null` until a request has produced a snapshot).
+async fn handler_usage() -> Json<serde_json::Value> {
+    Json(json!({
+        "codex": crate::providers::codex::rate_limits::latest(),
     }))
 }
 
